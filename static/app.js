@@ -58,6 +58,102 @@ async function api(path, method = 'GET', body) {
 }
 function lsGet(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }
 function lsSet(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, JSON.stringify(v)); } catch { } }
+const b64enc = s => { const b = new TextEncoder().encode(s); let bin = ''; for (let i = 0; i < b.length; i += 0x8000) bin += String.fromCharCode(...b.subarray(i, i + 0x8000)); return btoa(bin); };
+const b64dec = s => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\s/g, '')), c => c.charCodeAt(0)));
+
+// ---------------- хранилище ----------------
+// github  — приватный репозиторий с данными (results/*.json, vocab.json, mistakes.json), работает и на GitHub Pages;
+// local   — server.py, папка data/;
+// browser — только localStorage этого браузера.
+const GH_DEFAULT_REPO = 'ke2zo/hsk-data';
+const Store = {
+  mode: null, gh: null, sha: {}, queue: Promise.resolve(),
+  async init() {
+    this.gh = lsGet('hsk.gh');
+    if (this.gh?.token) { this.mode = 'github'; return; }
+    try {
+      const r = await fetch('/api/results', { cache: 'no-store' });
+      if (r.ok && (r.headers.get('content-type') || '').includes('json')) { this.mode = 'local'; return; }
+    } catch { }
+    this.mode = lsGet('hsk.browserOnly') ? 'browser' : null;
+  },
+  where() {
+    return { github: `репозиторий ${this.gh?.repo}`, local: 'папка data/ на компьютере', browser: 'только этот браузер' }[this.mode] || 'не настроено';
+  },
+  async loadAll() {
+    if (this.mode === 'local') {
+      const [results, vocab, mistakes] = await Promise.all([api('/api/results'), api('/api/store/vocab'), api('/api/store/mistakes')]);
+      return { results, vocab, mistakes };
+    }
+    if (this.mode === 'github') {
+      const r = await this.ghReq('results');
+      let results = [];
+      if (r.ok) {
+        const files = (await r.json()).filter(f => f.name.endsWith('.json'));
+        results = await Promise.all(files.map(f => this.ghGet(f.path)));
+      } else if (r.status !== 404) throw new Error(`GitHub ${r.status}`);
+      const [vocab, mistakes] = await Promise.all([this.ghGet('vocab.json'), this.ghGet('mistakes.json')]);
+      return { results, vocab, mistakes };
+    }
+    return lsGet('hsk.data') || { results: [] };
+  },
+  saveResult(r) {
+    if (this.mode === 'local') return api('/api/results', 'POST', r);
+    if (this.mode === 'github') return this.ghPut(`results/${r.id}.json`, r, `result ${r.testId} ${new Date(r.finishedAt).toISOString().slice(0, 16)}`);
+    return this.saveBrowser();
+  },
+  deleteResult(id) {
+    if (this.mode === 'local') return api('/api/results/' + id, 'DELETE');
+    if (this.mode === 'github') return this.ghDel(`results/${id}.json`);
+    return this.saveBrowser();
+  },
+  save(name, obj) {
+    if (this.mode === 'local') return api('/api/store/' + name, 'PUT', obj);
+    if (this.mode === 'github') return this.ghPut(`${name}.json`, obj, `update ${name}`);
+    return this.saveBrowser();
+  },
+  saveBrowser() { lsSet('hsk.data', { results: S.results, vocab: S.vocab, mistakes: S.mistakes }); return Promise.resolve(); },
+
+  ghReq(path, opts = {}, repo = this.gh.repo, token = this.gh.token) {
+    return fetch(`https://api.github.com/repos/${repo}${path == null ? '' : '/contents/' + path}`, {
+      ...opts, cache: 'no-store',
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
+    });
+  },
+  async ghGet(path) {
+    const r = await this.ghReq(path);
+    if (r.status === 404) { delete this.sha[path]; return null; }
+    if (!r.ok) throw new Error(`GitHub ${r.status}`);
+    const j = await r.json(); this.sha[path] = j.sha;
+    return JSON.parse(b64dec(j.content));
+  },
+  // записи идут по очереди, чтобы не было конфликтов sha
+  enqueue(fn) {
+    const p = this.queue.then(fn);
+    this.queue = p.catch(e => toast('Не удалось сохранить в GitHub: ' + e.message));
+    return this.queue;
+  },
+  ghPut(path, obj, message) {
+    const run = async retry => {
+      const body = { message, content: b64enc(JSON.stringify(obj, null, 1)) };
+      if (this.sha[path]) body.sha = this.sha[path];
+      const r = await this.ghReq(path, { method: 'PUT', body: JSON.stringify(body) });
+      if ((r.status === 409 || r.status === 422) && retry) { await this.ghGet(path); return run(false); }
+      if (!r.ok) throw new Error(`${r.status}`);
+      this.sha[path] = (await r.json()).content.sha;
+    };
+    return this.enqueue(() => run(true));
+  },
+  ghDel(path) {
+    return this.enqueue(async () => {
+      if (!this.sha[path]) await this.ghGet(path);
+      if (!this.sha[path]) return;
+      const r = await this.ghReq(path, { method: 'DELETE', body: JSON.stringify({ message: `delete ${path}`, sha: this.sha[path] }) });
+      if (!r.ok) throw new Error(`${r.status}`);
+      delete this.sha[path];
+    });
+  },
+};
 
 // ---------------- состояние ----------------
 const S = { catalog: [], tests: {}, results: [], vocab: [], mistakes: {} };
@@ -77,8 +173,8 @@ async function getTest(id) {
   }
   return S.tests[id];
 }
-const saveVocab = () => api('/api/store/vocab', 'PUT', S.vocab);
-const saveMistakes = () => api('/api/store/mistakes', 'PUT', S.mistakes);
+const saveVocab = () => Store.save('vocab', S.vocab);
+const saveMistakes = () => Store.save('mistakes', S.mistakes);
 const draft = { get: () => lsGet('hsk.draft'), set: d => lsSet('hsk.draft', d) };
 
 // ---------------- подсчёт баллов ----------------
@@ -129,11 +225,13 @@ const routes = [
   [/^#\/mistakes$/, mistakesView],
   [/^#\/vocab$/, vocabView],
   [/^#\/guide$/, guideView],
+  [/^#\/settings$/, settingsView],
 ];
 async function render() {
   clearInterval(timerHandle); timerHandle = null;
   if (segAudio) segAudio.pause();
   const h = location.hash || '#/';
+  if (!Store.mode && !/^#\/(settings|guide)$/.test(h)) { location.hash = '#/settings'; return; }
   $$('.topbar nav a').forEach(a => a.classList.toggle('active', h.startsWith(a.getAttribute('href'))));
   for (const [re, fn] of routes) {
     const m = h.match(re);
@@ -411,8 +509,8 @@ async function finishSection() {
   };
   for (const n in r.essays) r.answers[n] = r.essays[n];
   r.summary = scoreResult(t, r);
-  await api('/api/results', 'POST', r);
   S.results.push(r);
+  await Store.saveResult(r);
   draft.set(null); lsSet('hsk.audiopos', null);
   location.hash = '#/result/' + r.id;
 }
@@ -577,7 +675,7 @@ async function statsView() {
     <h2>Точность по типам вопросов</h2>
     <div class="card"><h3 style="margin-top:0">Последние ${recent.length} попыт.</h3>${tagBars(last)}</div>
     ${rs.length > recent.length ? `<div class="card"><h3 style="margin-top:0">За всё время</h3>${tagBars(all)}</div>` : ''}
-    <p class="muted small">Совет: скажи Claude «проанализируй мои результаты» — все попытки лежат в папке <code>data/results/</code>, по ним можно составить персональный план.</p>
+    <p class="muted small">Совет: скажи Claude «проанализируй мои результаты» — все попытки сохраняются (${esc(Store.where())}), по ним можно составить персональный план.</p>
   `);
 }
 function trendChart(h) {
@@ -754,7 +852,7 @@ function guideView() {
     <li><b>Работа над ошибками</b> через 1 и через 3 дня — вопрос уходит, когда решишь его правильно дважды в разные дни.</li>
     <li><b>Отработка слабых типов.</b> Открой «Статистику» → блок «Что подтянуть» и тренируй именно эти навыки.</li>
     <li><b>Новый тест</b> через неделю. Пришли Claude PDF + mp3 — он добавит тест в каталог.</li>
-    <li><b>Анализ.</b> Раз в 1–2 недели проси Claude «проанализируй мои результаты» — он прочитает папку <code>data/results</code> и составит план.</li>
+    <li><b>Анализ.</b> Раз в 1–2 недели проси Claude «проанализируй мои результаты» — он прочитает твои сохранённые попытки и составит план.</li>
   </ol>
   <p class="tip"><b>Отмечай «? не уверен»</b> честно. Угаданный ответ — такая же дыра в знаниях, как ошибка; сайт добавит его в работу над ошибками и учтёт в статистике.</p>
 
@@ -799,6 +897,69 @@ function guideView() {
   </table>
   <p class="muted small">Слова: HSK5 = 2500 слов. Если в тексте больше 3–4 незнакомых слов на абзац — словарь пока важнее тестов: добавь 20 новых слов в день.</p>
   </div>`);
+}
+
+// ---------------- настройки ----------------
+function settingsView() {
+  const gh = Store.gh || {};
+  view(`
+    <h1>Настройки сохранения</h1>
+    <div class="card"><b>Результаты сохраняются:</b> ${Store.mode ? esc(Store.where()) : '<span style="color:var(--warn)">ещё не настроено — выбери вариант ниже</span>'}</div>
+    <h2>Синхронизация через GitHub (рекомендуется)</h2>
+    <div class="card">
+      <p>Попытки, словарь и работа над ошибками сохраняются в твой <b>приватный</b> репозиторий: одинаково на компьютере и телефоне, и Claude может их анализировать.</p>
+      <ol class="small">
+        <li>Открой <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">создание токена</a> (Fine-grained token).</li>
+        <li>Token name: <code>hsk</code>, Expiration — на свой выбор (например, 1 год).</li>
+        <li>Repository access → <b>Only select repositories</b> → <code>${esc((gh.repo || GH_DEFAULT_REPO).split('/')[1])}</code>.</li>
+        <li>Permissions → Repository permissions → <b>Contents: Read and write</b>.</li>
+        <li>Generate token → скопируй и вставь ниже.</li>
+      </ol>
+      <label class="small muted">Репозиторий с данными</label>
+      <input type="text" id="ghRepo" value="${esc(gh.repo || GH_DEFAULT_REPO)}" style="width:100%">
+      <label class="small muted" style="display:block;margin-top:8px">Токен</label>
+      <input type="password" id="ghToken" placeholder="${gh.token ? 'токен сохранён — вставь новый, чтобы заменить' : 'github_pat_…'}" style="width:100%" autocomplete="off">
+      <p class="muted small">Токен хранится только в этом браузере и даёт доступ только к выбранному репозиторию.</p>
+      <div class="row"><button class="btn primary" data-act="ghSave">Подключить</button>
+        ${gh.token ? '<button class="btn danger" data-act="ghOff">Отключить на этом устройстве</button>' : ''}</div>
+    </div>
+    ${Store.mode !== 'github' && Store.mode !== 'browser' && Store.mode !== 'local' ? `<h2>Без синхронизации</h2>
+    <div class="card row"><span class="muted">Результаты будут жить только в этом браузере (можно сделать резервную копию ниже).</span><div class="spacer"></div>
+      <button class="btn" data-act="browserOnly">Сохранять только в браузере</button></div>` : ''}
+    ${Store.mode ? `<h2>Резервная копия</h2>
+    <div class="card row"><button class="btn" data-act="exportAll">Скачать все данные (JSON)</button>
+      <label class="btn">Загрузить из файла<input type="file" accept=".json" id="importFile" hidden></label>
+      <span class="muted small">Импорт добавляет недостающие попытки и слова, ничего не удаляет.</span></div>` : ''}
+  `);
+  const f = $('#importFile');
+  if (f) f.onchange = async () => {
+    try { await importData(JSON.parse(await f.files[0].text())); toast('Данные загружены'); }
+    catch (e) { toast('Не удалось прочитать файл: ' + e.message); }
+  };
+}
+async function importData(d) {
+  const have = new Set(S.results.map(r => r.id));
+  for (const r of d.results || []) if (r && !have.has(r.id)) { S.results.push(r); await Store.saveResult(r); }
+  const words = new Set(S.vocab.map(v => v.w));
+  const nv = (d.vocab || []).filter(v => !words.has(v.w));
+  if (nv.length) { S.vocab.push(...nv); await saveVocab(); }
+  if (d.mistakes && Object.keys(d.mistakes).length) { S.mistakes = { ...d.mistakes, ...S.mistakes }; await saveMistakes(); }
+}
+async function connectGitHub() {
+  const repo = $('#ghRepo').value.trim().replace(/^https:\/\/github.com\//, '').replace(/\/$/, '');
+  const token = $('#ghToken').value.trim() || Store.gh?.token;
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { toast('Репозиторий в формате owner/name'); return; }
+  if (!token) { toast('Вставь токен'); return; }
+  const r = await Store.ghReq(null, {}, repo, token).catch(() => null);
+  if (!r || !r.ok) { toast(r?.status === 404 ? 'Репозиторий не найден или у токена нет к нему доступа' : `GitHub ответил ${r?.status || 'ошибкой сети'} — проверь токен`); return; }
+  const prev = Store.mode === 'browser' ? lsGet('hsk.data') : null;
+  lsSet('hsk.gh', { repo, token });
+  Store.gh = { repo, token }; Store.mode = 'github'; Store.sha = {};
+  const d = await Store.loadAll();
+  S.results = (d.results || []).filter(Boolean); S.vocab = d.vocab || []; S.mistakes = d.mistakes || {};
+  if (prev) { await importData(prev); lsSet('hsk.data', null); lsSet('hsk.browserOnly', null); }
+  toast('GitHub подключён ✓');
+  location.hash = '#/';
 }
 
 // ---------------- обработчики ----------------
@@ -854,17 +1015,17 @@ document.addEventListener('click', async e => {
       const r = S.results.find(x => x.id === el.dataset.rid);
       r.selfScores = { ...r.selfScores, [n]: +el.dataset.v };
       r.summary = scoreResult(await getTest(r.testId), r);
-      await api('/api/results', 'POST', r);
+      Store.saveResult(r);
       const y = scrollY; await resultView(r.id); scrollTo(0, y); break;
     }
     case 'copyEssay': { const r = S.results.find(x => x.id === el.dataset.rid), t = await getTest(r.testId); copy(essayPrompt(t, t.qs[n].q, r.essays?.[n] || '')); break; }
     case 'copyResult': {
       const r = S.results.find(x => x.id === el.dataset.rid), t = await getTest(r.testId), sc = scoreResult(t, r);
       const wrong = Object.entries(sc.byQ).filter(([, b]) => b.status && b.status !== 'ok').map(([k]) => `${k}(${r.answers[k] || '—'}→${t.qs[k].q.answer || t.qs[k].q.accepted[0]})`);
-      copy(`Мой результат ${t.level} ${t.title} (${fmtDate(r.finishedAt)}): ${r.sections.map(s => `${SECTIONS[s]} ${sc.sections[s].score}`).join(', ')}${sc.total != null ? `, итого ${sc.total}/300` : ''}.\nОшибки: ${wrong.join(', ') || 'нет'}.\nНе уверен: ${Object.keys(r.unsure || {}).join(', ') || 'нет'}.\nПроанализируй мои слабые места и дай план. Файл результата: data/results/${r.id}.json`);
+      copy(`Мой результат ${t.level} ${t.title} (${fmtDate(r.finishedAt)}): ${r.sections.map(s => `${SECTIONS[s]} ${sc.sections[s].score}`).join(', ')}${sc.total != null ? `, итого ${sc.total}/300` : ''}.\nОшибки: ${wrong.join(', ') || 'нет'}.\nНе уверен: ${Object.keys(r.unsure || {}).join(', ') || 'нет'}.\nПроанализируй мои слабые места и дай план. Файл результата: results/${r.id}.json (${Store.where()})`);
       break;
     }
-    case 'delResult': if (confirm('Удалить эту попытку навсегда?')) { await api('/api/results/' + el.dataset.rid, 'DELETE'); S.results = S.results.filter(x => x.id !== el.dataset.rid); location.hash = '#/stats'; } break;
+    case 'delResult': if (confirm('Удалить эту попытку навсегда?')) { S.results = S.results.filter(x => x.id !== el.dataset.rid); await Store.deleteResult(el.dataset.rid); location.hash = '#/stats'; } break;
     case 'mstart': {
       const list = (await collectMistakes());
       const sel = [];
@@ -883,6 +1044,14 @@ document.addEventListener('click', async e => {
       saveVocab(); flash.i++; flash.show = false; flashView(); break;
     }
     case 'flashExit': flash = null; vocabView(); break;
+    case 'ghSave': connectGitHub(); break;
+    case 'ghOff': if (confirm('Отключить синхронизацию на этом устройстве? Данные в репозитории останутся.')) { lsSet('hsk.gh', null); location.hash = '#/settings'; location.reload(); } break;
+    case 'browserOnly': lsSet('hsk.browserOnly', true); await Store.init(); { const d = await Store.loadAll(); S.results = d.results || []; S.vocab = d.vocab || []; S.mistakes = d.mistakes || {}; } location.hash = '#/'; break;
+    case 'exportAll': {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([JSON.stringify({ results: S.results, vocab: S.vocab, mistakes: S.mistakes }, null, 1)], { type: 'application/json' }));
+      a.download = `hsk-backup-${dayKey(Date.now())}.json`; a.click(); break;
+    }
     case 'exportCsv': {
       const csv = S.vocab.map(v => [v.w, v.py, v.tr].map(x => `"${String(x || '').replace(/"/g, '""')}"`).join(',')).join('\n');
       const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv' })); a.download = 'hsk-vocab.csv'; a.click(); break;
@@ -901,12 +1070,14 @@ window.addEventListener('hashchange', () => { if (!location.hash.startsWith('#/m
 
 (async function init() {
   try {
-    [S.catalog, S.results, S.vocab, S.mistakes] = await Promise.all([
-      fetch('tests/catalog.json').then(r => r.json()), api('/api/results'), api('/api/store/vocab'), api('/api/store/mistakes'),
-    ]);
-    S.vocab ||= []; S.mistakes ||= {};
+    S.catalog = await fetch('tests/catalog.json').then(r => r.json());
+    await Store.init();
+    if (!Store.mode) { if (!location.hash.startsWith('#/guide')) location.hash = '#/settings'; render(); return; }
+    const d = await Store.loadAll();
+    S.results = (d.results || []).filter(Boolean); S.vocab = d.vocab || []; S.mistakes = d.mistakes || {};
   } catch (err) {
-    $('#app').innerHTML = `<div class="card"><b>Не удалось загрузить данные.</b><p>Сайт нужно запускать через сервер: <code>python3 server.py</code> и открыть <a href="http://localhost:8765">http://localhost:8765</a>.</p><p class="muted small">${esc(err.message)}</p></div>`;
+    $('#app').innerHTML = `<div class="card"><b>Не удалось загрузить данные.</b><p class="muted small">${esc(err.message)}</p>
+      <p>Если сохранение настроено через GitHub — проверь токен в <a href="#/settings">настройках</a>.</p></div>`;
     return;
   }
   render();

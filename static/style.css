@@ -117,7 +117,7 @@ details > summary { cursor: pointer; color: var(--blue); font-size: 14px; }
 
 /* essays */
 textarea { width: 100%; min-height: 170px; border: 1.5px solid var(--line); border-radius: 10px; padding: 10px; background: var(--card); color: var(--ink); font: 18px/1.8 var(--zh); resize: vertical; }
-input[type=text], input[type=search], select { border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; background: var(--card); color: var(--ink); font: inherit; }
+input[type=text], input[type=password], input[type=search], select { border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; background: var(--card); color: var(--ink); font: inherit; }
 .req { display: inline-block; margin: 2px; padding: 2px 10px; border-radius: 99px; background: var(--bad-soft); color: var(--bad); font: 16px var(--zh); }
 .req.ok { background: var(--ok-soft); color: var(--ok); }
 

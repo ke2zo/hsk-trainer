@@ -2,14 +2,20 @@
 
 Локальный сайт для решения пробных тестов HSK. Пользователь общается по-русски.
 
-Запуск: `python3 server.py` (или двойной клик по `start.command`) → http://localhost:8765. Без зависимостей.
+Сайт: https://ke2zo.github.io/hsk-trainer/ (GitHub Pages из публичного репо `ke2zo/hsk-trainer`, ветка main).
+Локально: `python3 server.py` (или двойной клик по `start.command`) → http://localhost:8765. Без зависимостей.
+
+## Где хранятся результаты (`Store` в app.js)
+- **github** (основной): приватный репо `ke2zo/hsk-data` — `results/*.json`, `vocab.json`, `mistakes.json`. Пишется браузером через fine-grained токен пользователя (Contents: read/write только на hsk-data), токен лежит в localStorage. Читать для анализа: `gh api repos/ke2zo/hsk-data/contents/results` или `git clone`.
+- **local**: если токена нет и доступен server.py — папка `data/` (в .gitignore, т.к. репо сайта публичный).
+- **browser**: только localStorage.
 
 ## Структура
 - `server.py` — статика (с поддержкой Range для mp3) + API: `GET/POST /api/results`, `DELETE /api/results/<id>`, `GET/PUT /api/store/<name>`.
 - `static/app.js` — всё приложение (hash-роутер). Типы вопросов и советы — объект `TAGS` в начале файла.
 - `tests/catalog.json` — список тестов в каталоге.
 - `tests/<id>/test.json` — сам тест, рядом `listening.mp3` и `img/`.
-- `data/results/*.json` — попытки пользователя (ответы, «не уверен», время, метки аудио). `data/vocab.json` — словарь, `data/mistakes.json` — прогресс по работе над ошибками.
+- Попытка (`results/<id>.json`): ответы, «не уверен», время, метки аудио, сочинения, самооценка. `vocab.json` — словарь, `mistakes.json` — прогресс по работе над ошибками.
 
 ## Как добавить новый тест (пользователь присылает PDF + mp3)
 1. `pdftotext -layout` для текста, `pdfimages -j` для картинок. Ответы и текст аудио обычно в конце PDF; если нет — найти официальный ключ (например myhsk.org/files/hsk-5/tests/<код>/answers-<код>-(myhsk.org).pdf, digmandarin.com).
@@ -24,4 +30,4 @@
 - `tag` — ключ из `TAGS` в `static/app.js` (lmeaning, lplace, ltime, lperson, lreason, ldetail, linfer, lattitude, laction, rword, rsent, rmatch, rdetail, rmain, rwordmeaning, rinfer, rreason, wadv, wattr, wprep, wba, wessay). Для других уровней HSK можно добавить новые теги.
 
 ## Анализ результатов
-Когда пользователь просит проанализировать результаты — читать `data/results/*.json` вместе с `test.json`, считать точность по `tag`, учитывать `unsure`, тексты сочинений в `essays`.
+Когда пользователь просит проанализировать результаты — читать `results/*.json` из `ke2zo/hsk-data` (или `data/results/` локально) вместе с `test.json`, считать точность по `tag`, учитывать `unsure`, тексты сочинений в `essays`.
