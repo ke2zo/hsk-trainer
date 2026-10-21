@@ -132,5 +132,11 @@ def _write(path, obj):
 if __name__ == "__main__":
     os.makedirs(RESULTS, exist_ok=True)
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
-    print(f"HSK тренажёр: http://localhost:{port}")
-    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError:
+        print(f"Порт {port} занят — скорее всего, тренажёр уже запущен: http://localhost:{port}")
+        print(f"Другой порт: python3 server.py {port + 1}")
+        sys.exit(1)
+    print(f"HSK тренажёр: http://localhost:{port}  (остановить: Ctrl+C)")
+    httpd.serve_forever()
