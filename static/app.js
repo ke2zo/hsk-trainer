@@ -783,7 +783,7 @@ const hskWords = async () => HSK ||= await fetch('static/hsk-words.json').then(r
 let hskLevel = lsGet('hsk.level') || 5;
 async function vocabView() {
   if (flash) return flashView();
-  const due = S.vocab.filter(isDue).length;
+  const due = todayCards().length;
   const hsk = await hskWords(), mine = new Set(S.vocab.map(v => v.w));
   const lvl = hsk.filter(x => x.l === hskLevel), have = lvl.filter(x => mine.has(x.w)).length;
   view(`
@@ -798,10 +798,10 @@ async function vocabView() {
         ${[1, 2, 3, 4, 5].map(l => `<button data-act="hskLevel" data-l="${l}" class="${l === hskLevel ? 'on' : ''}">${l}</button>`).join('')}
       </div><span class="muted">в словаре ${have} из ${lvl.length}</span>
       <div class="spacer"></div>
-      <button class="btn primary" data-act="hskAdd" data-k="20" ${have < lvl.length ? '' : 'disabled'}>+ 20 новых слов</button>
+      <button class="btn primary" data-act="hskAddAll" data-l="${hskLevel}" ${have < lvl.length ? '' : 'disabled'}>+ Добавить все (${lvl.length - have})</button>
       <a class="btn" href="#/hsk/${hskLevel}">Весь список</a></div>
       <div class="bar" style="margin-top:12px"><i style="width:${pct(have, lvl.length)}%;background:var(--ok)"></i></div>
-      <p class="muted small">Все слова уровня с пиньинем и переводом. HSK 5 — это 1300 новых слов поверх 1200 слов HSK 1–4. Добавляй по 20 в день и проходи карточки: так весь уровень пройдёшь за ~2 месяца.</p></div>
+      <p class="muted small">Все слова уровня с пиньинем и переводом. HSK 5 — это 1300 новых слов поверх 1200 слов HSK 1–4. Новых карточек приходит не больше ${NEW_PER_DAY} в день (свои слова из тестов — первыми), так весь уровень пройдёшь за ~2 месяца.</p></div>
     ${S.vocab.length ? `<div class="card"><table><tr><th>Слово</th><th>Пиньинь</th><th>Перевод</th><th>Откуда</th><th>Уровень</th><th></th></tr>
       ${S.vocab.map((v, i) => `<tr><td class="zh">${esc(v.w)}</td><td>${esc(v.py)}</td><td>${esc(v.tr)}</td><td class="muted small">${esc(v.src)}</td><td>${v.box || 0}</td>
         <td><button class="btn sm ghost" data-act="delWord" data-i="${i}">✕</button></td></tr>`).reverse().join('')}</table></div>` : '<p class="muted">Словарь пуст.</p>'}
@@ -828,7 +828,16 @@ async function addHskWords(words) {
   return nv.length;
 }
 const BOX_DAYS = [0, 1, 3, 7, 14, 30];
-const isDue = v => !v.next || v.next <= Date.now();
+// новые (ещё ни разу не отвеченные) карточки выдаются не больше NEW_PER_DAY в день;
+// слова, добавленные вручную из тестов, идут раньше слов из списка HSK
+const NEW_PER_DAY = 20;
+function todayCards() {
+  const today = dayKey(Date.now());
+  const left = Math.max(0, NEW_PER_DAY - S.vocab.filter(v => v.first && dayKey(v.first) === today).length);
+  const fresh = S.vocab.filter(v => !v.next);
+  const newOnes = [...fresh.filter(v => !/^HSK/.test(v.src || '')), ...fresh.filter(v => /^HSK/.test(v.src || ''))].slice(0, left);
+  return [...S.vocab.filter(v => v.next && v.next <= Date.now()), ...newOnes];
+}
 function flashView() {
   const v = flash.queue[flash.i];
   if (!v) { flash = null; view(`<div class="card flash"><div class="w">好!</div><p>Карточки на сегодня закончились.</p><a class="btn primary" href="#/vocab" data-act="flashExit">К словарю</a></div>`); return; }
@@ -1078,29 +1087,25 @@ document.addEventListener('click', async e => {
     case 'mcheck': { const t = await getTest(M.queue[M.i].testId), q = t.qs[M.queue[M.i].n].q; mistakeAnswer((M.order || []).map(i => q.words[i]).join('')); break; }
     case 'mnext': M.i++; M.answered = null; M.order = null; if (segAudio) segAudio.pause(); mistakeCard(); break;
     case 'mexit': M = null; mistakesView(); break;
-    case 'flashStart': flash = { queue: S.vocab.filter(isDue).sort(() => Math.random() - .5), i: 0, show: false }; if (!flash.queue.length) { flash = null; toast('На сегодня карточек нет'); } else flashView(); break;
+    case 'flashStart': flash = { queue: todayCards().sort(() => Math.random() - .5), i: 0, show: false }; if (!flash.queue.length) { flash = null; toast('На сегодня карточек нет'); } else flashView(); break;
     case 'flashShow': flash.show = true; flashView(); break;
     case 'flashAns': {
       const v = flash.queue[flash.i];
+      if (!v.next) v.first = Date.now();
       v.box = el.dataset.ok === '1' ? Math.min((v.box || 0) + 1, BOX_DAYS.length - 1) : 1;
       v.next = Date.now() + BOX_DAYS[v.box] * 864e5 - 3600e3;
       saveVocab(); flash.i++; flash.show = false; flashView(); break;
     }
     case 'flashExit': flash = null; vocabView(); break;
     case 'hskLevel': hskLevel = +el.dataset.l; lsSet('hsk.level', hskLevel); vocabView(); break;
-    case 'hskAdd': {
-      const mine = new Set(S.vocab.map(v => v.w));
-      const k = await addHskWords((await hskWords()).filter(x => x.l === hskLevel && !mine.has(x.w)).slice(0, +el.dataset.k));
-      toast(`Добавлено слов: ${k}`); vocabView(); break;
-    }
     case 'hskAddOne': {
       await addHskWords((await hskWords()).filter(x => x.w === el.dataset.w));
       el.outerHTML = '<span class="muted small">в словаре</span>'; break;
     }
     case 'hskAddAll': {
       const l = +el.dataset.l;
-      if (!confirm(`Добавить все слова HSK ${l} в карточки? Они все станут «на сегодня» — лучше добавлять по 20 в день.`)) break;
-      toast(`Добавлено слов: ${await addHskWords((await hskWords()).filter(x => x.l === l))}`); hskView(l); break;
+      toast(`Добавлено слов: ${await addHskWords((await hskWords()).filter(x => x.l === l))}`);
+      location.hash === '#/vocab' ? vocabView() : hskView(l); break;
     }
     case 'ghSave': connectGitHub(); break;
     case 'ghOff': if (confirm('Отключить синхронизацию на этом устройстве? Данные в репозитории останутся.')) { lsSet('hsk.gh', null); location.hash = '#/settings'; location.reload(); } break;

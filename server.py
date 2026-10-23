@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -123,7 +124,8 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def _write(path, obj):
-    tmp = path + ".tmp"
+    # своё имя tmp на каждый поток: параллельные PUT не мешают друг другу
+    tmp = f"{path}.{threading.get_ident()}.tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(obj, fh, ensure_ascii=False, indent=1)
     os.replace(tmp, path)
