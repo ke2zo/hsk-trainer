@@ -211,7 +211,7 @@
           "groups": [
             {"questions": [
               {"n": 99, "type": "essay", "prompt": "请结合下列词语（要全部使用），写一篇 80 字左右的短文。", "required": ["结账", "干脆", "感谢", "临时", "海鲜"], "minChars": 80, "tag": "wessay"},
-              {"n": 100, "type": "essay", "prompt": "请结合这张图片写一篇 80 字左右的短文。", "image": "img/5.jpg", "minChars": 80, "tag": "wessay"}
+              {"n": 100, "type": "essay", "prompt": "请结合这张图片写一篇 80 字左右的短文。", "image": "img/5.jpg", "imageDesc": "мужчина и женщина в деловой одежде разговаривают у кулера с водой, держат стаканчики", "minChars": 80, "tag": "wessay"}
             ]}
           ]
         }
