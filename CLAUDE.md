@@ -15,6 +15,7 @@
 - `static/app.js` — всё приложение (hash-роутер). Типы вопросов и советы — объект `TAGS` в начале файла.
 - `static/hsk-words.json` — слова HSK 2.0 уровней 1–5 (`{w, py, tr, l}`, русский перевод) из [LiudmilaLV/json_hsk](https://github.com/LiudmilaLV/json_hsk); пустые переводы дописаны вручную. Используется в «Словаре» (добавить 20 новых слов, весь список `#/hsk/<уровень>`) и для автозаполнения в диалоге «+ в словарь».
 - `static/drills.json` — упражнения «Похожие слова» (`#/words`: `synonyms[] = {id, words, rule, items:[{s с ＿＿, a, why}]}`) и «Грамматика» (`#/grammar`: `grammar[] = {id, title, tag, rule, examples, items}`; пункт — выбор `{s, o, a, why}` или порядок слов `{type:"order", w:[слова по порядку], a:[верные варианты], tr}`; в парных связках ответ «即使…也» заполняет два ＿＿). Прогресс — `drills.json` в хранилище: `{"syn|gram:<id>:<i>": {n, ok, last}}`.
+- `#/essay` — тренажёр сочинения 99 (5 случайных слов HSK 5, черновик в localStorage `hsk.essayDraft`, сохранённые — `essays.json`: `[{id, at, words, text, score, secs}]`). `#/dictation` — диктант по фразам из транскриптов аудирования всех тестов (озвучка speechSynthesis zh-CN), средний результат в `drills.json` → `dict`.
 - `tests/catalog.json` — список тестов в каталоге.
 - `tests/<id>/test.json` — сам тест, рядом `listening.mp3` и `img/`.
 - Попытка (`results/<id>.json`): ответы, «не уверен», время, метки аудио, сочинения, самооценка. `vocab.json` — словарь, `mistakes.json` — прогресс по работе над ошибками.

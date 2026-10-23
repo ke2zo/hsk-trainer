@@ -82,8 +82,8 @@ const Store = {
   },
   async loadAll() {
     if (this.mode === 'local') {
-      const [results, vocab, mistakes, drills] = await Promise.all([api('/api/results'), api('/api/store/vocab'), api('/api/store/mistakes'), api('/api/store/drills')]);
-      return { results, vocab, mistakes, drills };
+      const [results, vocab, mistakes, drills, essays] = await Promise.all([api('/api/results'), api('/api/store/vocab'), api('/api/store/mistakes'), api('/api/store/drills'), api('/api/store/essays')]);
+      return { results, vocab, mistakes, drills, essays };
     }
     if (this.mode === 'github') {
       const r = await this.ghReq('results');
@@ -92,8 +92,8 @@ const Store = {
         const files = (await r.json()).filter(f => f.name.endsWith('.json'));
         results = await Promise.all(files.map(f => this.ghGet(f.path)));
       } else if (r.status !== 404) throw new Error(`GitHub ${r.status}`);
-      const [vocab, mistakes, drills] = await Promise.all([this.ghGet('vocab.json'), this.ghGet('mistakes.json'), this.ghGet('drills.json')]);
-      return { results, vocab, mistakes, drills };
+      const [vocab, mistakes, drills, essays] = await Promise.all([this.ghGet('vocab.json'), this.ghGet('mistakes.json'), this.ghGet('drills.json'), this.ghGet('essays.json')]);
+      return { results, vocab, mistakes, drills, essays };
     }
     return lsGet('hsk.data') || { results: [] };
   },
@@ -112,7 +112,7 @@ const Store = {
     if (this.mode === 'github') return this.ghPut(`${name}.json`, obj, `update ${name}`);
     return this.saveBrowser();
   },
-  saveBrowser() { lsSet('hsk.data', { results: S.results, vocab: S.vocab, mistakes: S.mistakes, drills: S.drills }); return Promise.resolve(); },
+  saveBrowser() { lsSet('hsk.data', { results: S.results, vocab: S.vocab, mistakes: S.mistakes, drills: S.drills, essays: S.essays }); return Promise.resolve(); },
 
   ghReq(path, opts = {}, repo = this.gh.repo, token = this.gh.token) {
     return fetch(`https://api.github.com/repos/${repo}${path == null ? '' : '/contents/' + path}`, {
@@ -156,7 +156,7 @@ const Store = {
 };
 
 // ---------------- состояние ----------------
-const S = { catalog: [], tests: {}, results: [], vocab: [], mistakes: {}, drills: {} };
+const S = { catalog: [], tests: {}, results: [], vocab: [], mistakes: {}, drills: {}, essays: [] };
 let timerHandle = null;
 let segAudio = null;
 
@@ -176,6 +176,7 @@ async function getTest(id) {
 const saveVocab = () => Store.save('vocab', S.vocab);
 const saveMistakes = () => Store.save('mistakes', S.mistakes);
 const saveDrills = () => Store.save('drills', S.drills);
+const saveEssays = () => Store.save('essays', S.essays);
 const draft = { get: () => lsGet('hsk.draft'), set: d => lsSet('hsk.draft', d) };
 
 // ---------------- подсчёт баллов ----------------
@@ -228,6 +229,8 @@ const routes = [
   [/^#\/hsk\/([1-5])$/, hskView],
   [/^#\/words$/, synView],
   [/^#\/grammar$/, gramView],
+  [/^#\/essay$/, essayView],
+  [/^#\/dictation$/, dictView],
   [/^#\/guide$/, guideView],
   [/^#\/settings$/, settingsView],
 ];
@@ -256,6 +259,15 @@ async function home() {
       <div class="muted small">последний полный тест · проходной балл 180</div>`;
   }
   const mcount = (await collectMistakes()).length;
+  const today = dayKey(Date.now()), cards = todayCards().length, wrong = wrongDrills('syn') + wrongDrills('gram');
+  const essayDone = S.essays.some(e => dayKey(e.at) === today);
+  const plan = [
+    [cards, `<a href="#/vocab">Карточки</a>: ${cards}`],
+    [mcount, `<a href="#/mistakes">Ошибки из тестов</a>: ${mcount}`],
+    [wrong, `<a href="#/mistakes">Ошибки в упражнениях</a>: ${wrong}`],
+    [!essayDone, `<a href="#/essay">Сочинение</a>: ${essayDone ? 'написано ✓' : 'ещё не писал сегодня'}`],
+    [1, `<a href="#/dictation">Диктант</a>: 5–10 фраз`],
+  ];
   const recent = [...S.results].sort((a, b) => b.finishedAt - a.finishedAt).slice(0, 5);
   const recentRows = [];
   for (const r of recent) {
@@ -272,6 +284,7 @@ async function home() {
     ${d ? `<div class="card" style="border-color:var(--accent)"><div class="row">
       <div><b>Незавершённая попытка</b><div class="muted small">${esc(d.testTitle)} · ${SECTIONS[d.sections[d.secIdx]]} · ${d.mode === 'exam' ? 'экзамен' : 'тренировка'}</div></div>
       <div class="spacer"></div><button class="btn" data-act="dropDraft">Удалить</button><a class="btn primary" href="#/run">Продолжить</a></div></div>` : ''}
+    <div class="card"><b>На сегодня</b><div class="row" style="margin-top:6px">${plan.map(([n, h]) => `<span class="pill ${n ? 'blue' : 'ok'}">${h}</span>`).join('')}</div></div>
     <div class="grid">
       <a class="tile" href="#/catalog"><div class="ico">试</div><b>Каталог тестов</b><span class="muted small">${S.catalog.length} тест(ов)</span></a>
       <a class="tile" href="#/mistakes"><div class="ico">错</div><b>Работа над ошибками</b><span class="muted small">${mcount} вопрос(ов) к повторению</span></a>
@@ -279,6 +292,8 @@ async function home() {
       <a class="tile" href="#/vocab"><div class="ico">词</div><b>Мой словарь</b><span class="muted small">${S.vocab.length} слов · карточки</span></a>
       <a class="tile" href="#/words"><div class="ico">近</div><b>Похожие слова</b><span class="muted small">穿/戴, 了解/理解… · упражнения</span></a>
       <a class="tile" href="#/grammar"><div class="ico">语</div><b>Грамматика</b><span class="muted small">把, 被, связки, порядок слов</span></a>
+      <a class="tile" href="#/essay"><div class="ico">写</div><b>Сочинение</b><span class="muted small">5 слов HSK 5 · проверка у Claude</span></a>
+      <a class="tile" href="#/dictation"><div class="ico">听</div><b>Диктант</b><span class="muted small">фразы из аудирования</span></a>
       <a class="tile" href="#/guide"><div class="ico">法</div><b>Как готовиться</b><span class="muted small">стратегии и план</span></a>
     </div>
     <h2>Последние попытки</h2>
@@ -727,6 +742,11 @@ async function mistakesView() {
   view(`
     <h1>Работа над ошибками</h1>
     <p class="muted">Здесь собираются вопросы, на которые ты ответил неверно или отметил «не уверен». Вопрос уходит из списка, когда ты решишь его правильно <b>2 раза в разные дни</b> — так работает интервальное повторение.</p>
+    ${wrongDrills('syn') + wrongDrills('gram') ? `<div class="card"><div class="row"><b>Ошибки в упражнениях</b>
+      <span class="muted">похожие слова: ${wrongDrills('syn')} · грамматика: ${wrongDrills('gram')}</span><div class="spacer"></div>
+      ${wrongDrills('syn') ? '<button class="btn sm" data-act="xstart" data-kind="syn" data-wrong="1">Повторить слова</button>' : ''}
+      ${wrongDrills('gram') ? '<button class="btn sm" data-act="xstart" data-kind="gram" data-wrong="1">Повторить грамматику</button>' : ''}</div>
+      <p class="muted small" style="margin-bottom:0">Упражнение уходит отсюда, когда ответишь на него верно.</p></div>` : ''}
     ${list.length ? `<div class="card"><div class="row"><b>Всего: ${list.length}</b><div class="spacer"></div>
       <button class="btn primary" data-act="mstart" data-tag="">Тренировать все (вперемешку)</button></div></div>
       <div class="card">${Object.entries(by).sort((a, b) => b[1].length - a[1].length).map(([tag, xs]) => `<div class="hbar" style="grid-template-columns:1fr auto auto">
@@ -796,6 +816,7 @@ async function vocabView() {
     <div class="card"><div class="row">
       <button class="btn primary" data-act="addWord" data-src="вручную">+ Добавить слово</button>
       <button class="btn" data-act="flashStart" ${S.vocab.length ? '' : 'disabled'}>Карточки (${due} на сегодня)</button>
+      <div class="seg">${[['zh', '汉 → RU'], ['ru', 'RU → 汉']].map(([k, v]) => `<button data-act="flashDir" data-dir="${k}" class="${flashDir === k ? 'on' : ''}">${v}</button>`).join('')}</div>
       <div class="spacer"></div><button class="btn sm" data-act="exportCsv" ${S.vocab.length ? '' : 'disabled'}>Экспорт CSV (Anki / Pleco)</button></div>
       <p class="muted small">Добавляй незнакомые слова из разбора теста: выдели слово мышкой → «+ в словарь». Карточки работают по системе Лейтнера: знаешь — интервал растёт (1→3→7→14→30 дней), не знаешь — карточка возвращается завтра.</p></div>
     <div class="card"><div class="row">
@@ -808,7 +829,7 @@ async function vocabView() {
       <div class="bar" style="margin-top:12px"><i style="width:${pct(have, lvl.length)}%;background:var(--ok)"></i></div>
       <p class="muted small">Все слова уровня с пиньинем и переводом. HSK 5 — это 1300 новых слов поверх 1200 слов HSK 1–4. Новых карточек приходит не больше ${NEW_PER_DAY} в день (свои слова из тестов — первыми), так весь уровень пройдёшь за ~2 месяца.</p></div>
     ${S.vocab.length ? `<div class="card"><table><tr><th>Слово</th><th>Пиньинь</th><th>Перевод</th><th>Откуда</th><th>Уровень</th><th></th></tr>
-      ${S.vocab.map((v, i) => `<tr><td class="zh">${esc(v.w)}</td><td>${esc(v.py)}</td><td>${esc(v.tr)}</td><td class="muted small">${esc(v.src)}</td><td>${v.box || 0}</td>
+      ${S.vocab.map((v, i) => `<tr><td class="zh"><a href="javascript:void(0)" data-act="say" data-text="${esc(v.w)}" title="Послушать">${esc(v.w)}</a></td><td>${esc(v.py)}</td><td>${esc(v.tr)}</td><td class="muted small">${esc(v.src)}</td><td>${v.box || 0}</td>
         <td><button class="btn sm ghost" data-act="delWord" data-i="${i}">✕</button></td></tr>`).reverse().join('')}</table></div>` : '<p class="muted">Словарь пуст.</p>'}
   `);
 }
@@ -822,7 +843,7 @@ async function hskView(l) {
       <input type="search" data-hsksearch placeholder="Поиск: иероглиф, пиньинь или перевод" style="flex:1;min-width:200px">
       <button class="btn" data-act="hskAddAll" data-l="${l}">Добавить все в словарь</button></div></div>
     <div class="card"><table><tr><th>Слово</th><th>Пиньинь</th><th>Перевод</th><th></th></tr>
-      ${list.map(x => `<tr data-hskrow="${esc([x.w, x.py, x.py.normalize('NFD').replace(/[̀-ͯ]/g, ''), x.tr].join(' ').toLowerCase())}"><td class="zh">${esc(x.w)}</td><td>${esc(x.py)}</td><td>${esc(x.tr)}</td>
+      ${list.map(x => `<tr data-hskrow="${esc([x.w, x.py, x.py.normalize('NFD').replace(/[̀-ͯ]/g, ''), x.tr].join(' ').toLowerCase())}"><td class="zh"><a href="javascript:void(0)" data-act="say" data-text="${esc(x.w)}" title="Послушать">${esc(x.w)}</a></td><td>${esc(x.py)}</td><td>${esc(x.tr)}</td>
         <td>${mine.has(x.w) ? '<span class="muted small">в словаре</span>' : `<button class="btn sm" data-act="hskAddOne" data-w="${esc(x.w)}">+</button>`}</td></tr>`).join('')}
     </table></div>`);
 }
@@ -843,14 +864,29 @@ function todayCards() {
   const newOnes = [...fresh.filter(v => !/^HSK/.test(v.src || '')), ...fresh.filter(v => /^HSK/.test(v.src || ''))].slice(0, left);
   return [...S.vocab.filter(v => v.next && v.next <= Date.now()), ...newOnes];
 }
+// направление карточек: zh — иероглиф → перевод, ru — перевод → иероглиф (нужно для сочинения)
+let flashDir = lsGet('hsk.flashDir') || 'zh';
 function flashView() {
   const v = flash.queue[flash.i];
   if (!v) { flash = null; view(`<div class="card flash"><div class="w">好!</div><p>Карточки на сегодня закончились.</p><a class="btn primary" href="#/vocab" data-act="flashExit">К словарю</a></div>`); return; }
+  const zh = `<div class="w">${esc(v.w)}</div>`, py = `<p style="font-size:20px">${esc(v.py)}</p>`, tr = `<p style="font-size:18px">${esc(v.tr)}</p>`;
+  const front = flashDir === 'zh' ? zh : tr, back = flashDir === 'zh' ? py + tr : zh + py;
   view(`<div class="row"><a href="javascript:void(0)" data-act="flashExit">← Словарь</a><div class="spacer"></div><span class="muted">${flash.i + 1}/${flash.queue.length}</span></div>
-    <div class="card flash"><div class="w">${esc(v.w)}</div>
-    ${flash.show ? `<p style="font-size:20px">${esc(v.py)}</p><p style="font-size:18px">${esc(v.tr)}</p>
+    <div class="card flash">${front}
+    ${flash.show ? `${back}<p><button class="btn sm" data-act="say" data-text="${esc(v.w)}">🔊 Ещё раз</button></p>
       <div class="row" style="justify-content:center"><button class="btn" data-act="flashAns" data-ok="0">Не помню</button><button class="btn primary" data-act="flashAns" data-ok="1">Помню</button></div>`
-      : `<button class="btn primary" data-act="flashShow">Показать</button>`}</div>`);
+      : `${flashDir === 'zh' ? `<p><button class="btn sm" data-act="say" data-text="${esc(v.w)}">🔊 Послушать</button></p>` : '<p class="muted small">Вспомни и напиши иероглифы (хотя бы мысленно), потом проверь</p>'}
+        <button class="btn primary" data-act="flashShow">Показать</button>`}</div>`);
+}
+// озвучка встроенным голосом браузера (zh-CN), без файлов
+function say(text, rate = 0.85) {
+  if (!window.speechSynthesis) { toast('Браузер не умеет озвучивать'); return; }
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'zh-CN'; u.rate = rate;
+  const voice = speechSynthesis.getVoices().find(x => /^zh[-_]CN/i.test(x.lang));
+  if (voice) u.voice = voice;
+  speechSynthesis.speak(u);
 }
 function wordDialog(src) {
   const sel = String(window.getSelection() || '').trim().slice(0, 30);
@@ -883,6 +919,7 @@ function wordDialog(src) {
 let DR = null, X = null;   // X — текущая тренировка
 const drillsData = async () => DR ||= await fetch('static/drills.json').then(r => r.json());
 const shuffle = a => a.map(x => [Math.random(), x]).sort((p, q) => p[0] - q[0]).map(p => p[1]);
+const wrongDrills = kind => Object.entries(S.drills).filter(([k, v]) => k.startsWith(kind + ':') && v.last === false).length;
 const drillHash = kind => kind === 'syn' ? '#/words' : '#/grammar';
 function groupStat(kind, g) {
   let n = 0, ok = 0, seen = 0;
@@ -913,10 +950,12 @@ async function gramView() {
       <details style="margin-top:8px"><summary>Правило и примеры</summary><p class="small">${esc(g.rule)}</p>
         <ul class="zh">${g.examples.map(x => `<li>${esc(x)}</li>`).join('')}</ul></details></div>`).join('')}`);
 }
-async function drillStart(kind, gid) {
+async function drillStart(kind, gid, wrongOnly) {
   const data = await drillsData();
   let queue = (kind === 'syn' ? data.synonyms : data.grammar).filter(g => !gid || g.id === gid)
     .flatMap(g => g.items.map((item, i) => ({ g, item, key: `${kind}:${g.id}:${i}` })));
+  if (wrongOnly) queue = queue.filter(e => S.drills[e.key]?.last === false);
+  if (!queue.length) { toast('Ошибок в упражнениях нет'); return; }
   queue = shuffle(queue);
   // вперемешку: сначала новые и ошибочные
   if (!gid) queue = queue.sort((a, b) => (S.drills[a.key]?.last ? 1 : 0) - (S.drills[b.key]?.last ? 1 : 0)).slice(0, 15);
@@ -963,6 +1002,86 @@ function drillAnswer(ans, right) {
   X.ans = ans; X.right = right; X.done++; if (right) X.ok++;
   p.n++; if (right) p.ok++; p.last = right;
   saveDrills(); drillCard();
+}
+
+// ---------------- сочинение (задание 99) ----------------
+// черновик — localStorage hsk.essayDraft = { words:[{w,py,tr}], text, started }; сохранённые — S.essays
+const newEssayDraft = async () => ({ words: shuffle((await hskWords()).filter(x => x.l === 5 && x.w.length === 2)).slice(0, 5), text: '', started: Date.now() });
+async function essayView() {
+  let d = lsGet('hsk.essayDraft');
+  if (!d) { d = await newEssayDraft(); lsSet('hsk.essayDraft', d); }
+  const q = { required: d.words.map(x => x.w) };
+  const hist = [...S.essays].sort((a, b) => b.at - a.at);
+  view(`<h1>Сочинение (задание 99)</h1>
+    <div class="card"><p class="muted small">Напиши связный текст на ~80 иероглифов, используя все 5 слов. На экзамене на оба сочинения остаётся ~25–30 минут — целься в 15 минут на одно.</p>
+      <div class="row"><b>Слова:</b>${d.words.map(x => `<a href="javascript:void(0)" class="pill zh" data-act="say" data-text="${esc(x.w)}" title="${esc(x.py + ' — ' + x.tr)}">${esc(x.w)}</a>`).join('')}
+        <div class="spacer"></div><span class="muted small" id="essayTimer">⏱ ${fmtTime((Date.now() - d.started) / 1000)}</span>
+        <button class="btn sm" data-act="essayNew">Другие слова</button></div>
+      <details class="small" style="margin-top:6px"><summary>Перевод слов</summary>${d.words.map(x => `<div><b class="zh">${esc(x.w)}</b> ${esc(x.py)} — ${esc(x.tr)}</div>`).join('')}</details>
+      <div data-req="essay" style="margin:8px 0">${reqHtml(q, d.text)}</div>
+      <textarea data-essaytrain placeholder="写在这里…">${esc(d.text)}</textarea>
+      <div class="muted small" id="essayCount">иероглифов: ${zhCount(d.text)} / ~80</div>
+      <div class="row" style="margin-top:10px"><button class="btn" data-act="essayCopy">Проверить с Claude (копировать)</button><div class="spacer"></div>
+        <span class="muted small">Оценка и в историю:</span>${RUBRIC.map((txt, i) => `<button class="btn sm" title="${esc(txt)}" data-act="essaySave" data-v="${i}">${i}</button>`).join('')}</div>
+      <p class="muted small">Скопируй текст в чат с Claude — получишь оценку 0–5, исправления и образец. Потом поставь балл: сочинение уйдёт в историю, а слова сменятся.</p></div>
+    ${hist.length ? `<h2>История (${hist.length})</h2>${hist.map(e => `<div class="card"><div class="row"><span class="muted small">${fmtDate(e.at)}</span>
+      ${e.words.map(w => `<span class="pill zh">${esc(w)}</span>`).join('')}<div class="spacer"></div>
+      <span class="muted small">${zhCount(e.text)} иер. · ${fmtTime(e.secs)}</span><b>${e.score} / 5</b></div>
+      <div class="transcript" style="margin-left:0">${esc(e.text)}</div></div>`).join('')}` : ''}`);
+  timerHandle = setInterval(() => { const el = $('#essayTimer'); if (el) el.textContent = '⏱ ' + fmtTime((Date.now() - d.started) / 1000); }, 1000);
+}
+const essayTrainPrompt = d => `Я готовлюсь к HSK 5. Задание 99: написать текст примерно на 80 иероглифов, используя слова: ${d.words.map(x => x.w).join('、')}.\n\nМой текст:\n${d.text}\n\nОцени по шкале 0–5, как на экзамене (все ли слова использованы и правильно ли, связность, грамматика, объём). Исправь ошибки и покажи исправленный вариант, объясни ошибки по-русски и дай образцовый вариант примерно на 90 иероглифов.`;
+
+// ---------------- диктант ----------------
+// фразы из транскриптов аудирования всех тестов каталога; читает голос браузера
+let DICT = null;   // { list, cur, ans }
+async function dictSentences() {
+  const out = new Set();
+  for (const c of S.catalog) {
+    const t = await getTest(c.id);
+    for (const { q, group, section } of Object.values(t.qs)) {
+      if (section.id !== 'listening') continue;
+      for (const line of String(q.transcript || group.transcript || '').split('\n'))
+        for (const sent of line.replace(/^[男女][：:]/, '').split(/(?<=[。！？])/))
+          if (zhCount(sent) >= 6 && zhCount(sent) <= 28) out.add(sent.trim());
+    }
+  }
+  return [...out];
+}
+// какие иероглифы эталона есть в ответе (по наибольшей общей подпоследовательности)
+function lcsHits(a, b) {
+  const n = a.length, m = b.length, dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const hit = new Array(n).fill(false);
+  for (let i = 0, j = 0; i < n && j < m;) {
+    if (a[i] === b[j]) { hit[i] = true; i++; j++; } else if (dp[i + 1][j] >= dp[i][j + 1]) i++; else j++;
+  }
+  return hit;
+}
+const zhChars = s => String(s || '').match(/[一-鿿]/g) || [];
+function dictResult() {
+  const ref = zhChars(DICT.cur), hit = lcsHits(ref, zhChars(DICT.ans));
+  const p = pct(hit.filter(Boolean).length, ref.length);
+  let k = 0;
+  const marked = [...DICT.cur].map(ch => /[一-鿿]/.test(ch) ? `<span style="color:${hit[k++] ? 'var(--ok)' : 'var(--bad)'};${hit[k - 1] ? '' : 'text-decoration:underline'}">${esc(ch)}</span>` : esc(ch)).join('');
+  return `<div class="transcript" style="margin-left:0;font-size:20px">${marked}</div>
+    <div class="row" style="margin-top:10px"><span class="pill ${p >= 90 ? 'ok' : p >= 60 ? 'warn' : 'bad'}">${p}% иероглифов</span>
+      <span class="muted small">красным — то, что не расслышал. Выдели слово → «+ в словарь».</span><div class="spacer"></div>
+      <button class="btn sm" data-act="addWord" data-src="диктант">+ в словарь</button><button class="btn primary" data-act="dictNext">Дальше →</button></div>`;
+}
+async function dictView() {
+  if (!DICT) DICT = { list: await dictSentences(), cur: null, ans: null };
+  if (!DICT.list.length) { view('<h1>Диктант</h1><p class="muted">В тестах каталога нет текстов аудирования.</p>'); return; }
+  DICT.cur ||= DICT.list[Math.floor(Math.random() * DICT.list.length)];
+  const st = S.drills.dict;
+  view(`<h1>Диктант</h1>
+    <div class="card"><p class="muted small">Фразы из аудирования тестов (${DICT.list.length} шт.), читает голос браузера. Слушай сколько нужно, набери услышанное иероглифами и сравни. Это тренирует то, на чём теряются баллы в аудировании: расслышать каждое слово.</p>
+      <div class="row"><button class="btn primary" data-act="say" data-text="${esc(DICT.cur)}" data-rate="0.8">▶ Слушать</button>
+        <button class="btn" data-act="say" data-text="${esc(DICT.cur)}" data-rate="0.55">🐢 Медленно</button><div class="spacer"></div>
+        ${st?.n ? `<span class="muted small">в среднем ${Math.round(st.sum / st.n)}% · ${st.n} фраз</span>` : ''}</div>
+      <input type="text" id="dictIn" class="zh" style="width:100%;margin-top:10px;box-sizing:border-box" placeholder="听写…" value="${esc(DICT.ans ?? '')}" ${DICT.ans != null ? 'disabled' : ''}>
+      ${DICT.ans != null ? dictResult() : `<div class="row" style="margin-top:10px"><button class="btn" data-act="dictCheck">Проверить</button><button class="btn ghost" data-act="dictNext">Другая фраза</button></div>`}
+    </div>`);
 }
 
 // ---------------- запросы для Claude ----------------
@@ -1089,6 +1208,8 @@ async function importData(d) {
   if (nv.length) { S.vocab.push(...nv); await saveVocab(); }
   if (d.mistakes && Object.keys(d.mistakes).length) { S.mistakes = { ...d.mistakes, ...S.mistakes }; await saveMistakes(); }
   if (d.drills && Object.keys(d.drills).length) { S.drills = { ...d.drills, ...S.drills }; await saveDrills(); }
+  const eids = new Set(S.essays.map(e => e.id)), ne = (d.essays || []).filter(e => !eids.has(e.id));
+  if (ne.length) { S.essays.push(...ne); await saveEssays(); }
 }
 async function connectGitHub() {
   const repo = $('#ghRepo').value.trim().replace(/^https:\/\/github.com\//, '').replace(/\/$/, '');
@@ -1101,7 +1222,7 @@ async function connectGitHub() {
   lsSet('hsk.gh', { repo, token });
   Store.gh = { repo, token }; Store.mode = 'github'; Store.sha = {};
   const d = await Store.loadAll();
-  S.results = (d.results || []).filter(Boolean); S.vocab = d.vocab || []; S.mistakes = d.mistakes || {}; S.drills = d.drills || {};
+  S.results = (d.results || []).filter(Boolean); S.vocab = d.vocab || []; S.mistakes = d.mistakes || {}; S.drills = d.drills || {}; S.essays = d.essays || [];
   if (prev) { await importData(prev); lsSet('hsk.data', null); lsSet('hsk.browserOnly', null); }
   toast('GitHub подключён ✓');
   location.hash = '#/';
@@ -1181,7 +1302,9 @@ document.addEventListener('click', async e => {
     case 'mnext': M.i++; M.answered = null; M.order = null; if (segAudio) segAudio.pause(); mistakeCard(); break;
     case 'mexit': M = null; mistakesView(); break;
     case 'flashStart': flash = { queue: todayCards().sort(() => Math.random() - .5), i: 0, show: false }; if (!flash.queue.length) { flash = null; toast('На сегодня карточек нет'); } else flashView(); break;
-    case 'flashShow': flash.show = true; flashView(); break;
+    case 'flashShow': flash.show = true; flashView(); say(flash.queue[flash.i].w); break;
+    case 'flashDir': flashDir = el.dataset.dir; lsSet('hsk.flashDir', flashDir); vocabView(); break;
+    case 'say': say(el.dataset.text, +(el.dataset.rate || 0.85)); break;
     case 'flashAns': {
       const v = flash.queue[flash.i];
       if (!v.next) v.first = Date.now();
@@ -1190,7 +1313,22 @@ document.addEventListener('click', async e => {
       saveVocab(); flash.i++; flash.show = false; flashView(); break;
     }
     case 'flashExit': flash = null; vocabView(); break;
-    case 'xstart': drillStart(el.dataset.kind, el.dataset.g); break;
+    case 'xstart': await drillStart(el.dataset.kind, el.dataset.g, !!el.dataset.wrong); if (X) location.hash = drillHash(X.kind); break;
+    case 'essayNew': if (!lsGet('hsk.essayDraft')?.text || confirm('Начать заново? Текст будет удалён.')) { lsSet('hsk.essayDraft', await newEssayDraft()); essayView(); } break;
+    case 'essayCopy': { const d = lsGet('hsk.essayDraft'); if (!zhCount(d?.text)) { toast('Сначала напиши текст'); break; } copy(essayTrainPrompt(d)); break; }
+    case 'essaySave': {
+      const d = lsGet('hsk.essayDraft'); if (!zhCount(d?.text)) { toast('Сначала напиши текст'); break; }
+      S.essays.push({ id: 'e' + Date.now(), at: Date.now(), words: d.words.map(x => x.w), text: d.text, score: +el.dataset.v, secs: Math.round((Date.now() - d.started) / 1000) });
+      await saveEssays(); lsSet('hsk.essayDraft', null); toast('Сохранено'); essayView(); break;
+    }
+    case 'dictCheck': {
+      const ans = $('#dictIn').value.trim(); if (!ans) { toast('Напиши, что услышал'); break; }
+      DICT.ans = ans;
+      const ref = zhChars(DICT.cur), p = pct(lcsHits(ref, zhChars(ans)).filter(Boolean).length, ref.length);
+      const st = S.drills.dict ||= { n: 0, sum: 0 }; st.n++; st.sum += p; saveDrills();
+      dictView(); break;
+    }
+    case 'dictNext': DICT.cur = null; DICT.ans = null; await dictView(); say(DICT.cur, 0.8); $('#dictIn')?.focus(); break;
     case 'xchoose': if (X && !X.ans) { const e = X.queue[X.i], o = e.opts[+el.dataset.k]; drillAnswer(o, o === e.item.a); } break;
     case 'xpick': X.pick.push(+el.dataset.i); drillCard(); break;
     case 'xunpick': X.pick.splice(+el.dataset.k, 1); drillCard(); break;
@@ -1209,10 +1347,10 @@ document.addEventListener('click', async e => {
     }
     case 'ghSave': connectGitHub(); break;
     case 'ghOff': if (confirm('Отключить синхронизацию на этом устройстве? Данные в репозитории останутся.')) { lsSet('hsk.gh', null); location.hash = '#/settings'; location.reload(); } break;
-    case 'browserOnly': lsSet('hsk.browserOnly', true); await Store.init(); { const d = await Store.loadAll(); S.results = d.results || []; S.vocab = d.vocab || []; S.mistakes = d.mistakes || {}; S.drills = d.drills || {}; } location.hash = '#/'; break;
+    case 'browserOnly': lsSet('hsk.browserOnly', true); await Store.init(); { const d = await Store.loadAll(); S.results = d.results || []; S.vocab = d.vocab || []; S.mistakes = d.mistakes || {}; S.drills = d.drills || {}; S.essays = d.essays || []; } location.hash = '#/'; break;
     case 'exportAll': {
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(new Blob([JSON.stringify({ results: S.results, vocab: S.vocab, mistakes: S.mistakes, drills: S.drills }, null, 1)], { type: 'application/json' }));
+      a.href = URL.createObjectURL(new Blob([JSON.stringify({ results: S.results, vocab: S.vocab, mistakes: S.mistakes, drills: S.drills, essays: S.essays }, null, 1)], { type: 'application/json' }));
       a.download = `hsk-backup-${dayKey(Date.now())}.json`; a.click(); break;
     }
     case 'exportCsv': {
@@ -1222,6 +1360,13 @@ document.addEventListener('click', async e => {
   }
 });
 document.addEventListener('input', e => {
+  if (e.target.matches('[data-essaytrain]')) {
+    const d = lsGet('hsk.essayDraft'); if (!d) return;
+    d.text = e.target.value; lsSet('hsk.essayDraft', d);
+    $('#essayCount').textContent = `иероглифов: ${zhCount(d.text)} / ~80`;
+    $('[data-req=essay]').innerHTML = reqHtml({ required: d.words.map(x => x.w) }, d.text);
+    return;
+  }
   if (e.target.matches('[data-hsksearch]')) {
     const q = e.target.value.trim().toLowerCase();
     $$('[data-hskrow]').forEach(tr => { tr.hidden = !!q && !tr.dataset.hskrow.includes(q); });
@@ -1234,6 +1379,9 @@ document.addEventListener('input', e => {
   const req = $(`[data-req="${n}"]`);
   if (req) getTest(draft.get().testId).then(t => { req.innerHTML = reqHtml(t.qs[n].q, text); });
 });
+document.addEventListener('keydown', e => {
+  if (e.target.id === 'dictIn' && e.key === 'Enter' && !e.isComposing) $('[data-act=dictCheck]')?.click();
+});
 window.addEventListener('hashchange', () => { if (!location.hash.startsWith('#/mistakes')) M = null; if (location.hash !== '#/vocab') flash = null; if (X && location.hash !== drillHash(X.kind)) X = null; render(); });
 
 (async function init() {
@@ -1242,7 +1390,7 @@ window.addEventListener('hashchange', () => { if (!location.hash.startsWith('#/m
     await Store.init();
     if (!Store.mode) { if (!location.hash.startsWith('#/guide')) location.hash = '#/settings'; render(); return; }
     const d = await Store.loadAll();
-    S.results = (d.results || []).filter(Boolean); S.vocab = d.vocab || []; S.mistakes = d.mistakes || {}; S.drills = d.drills || {};
+    S.results = (d.results || []).filter(Boolean); S.vocab = d.vocab || []; S.mistakes = d.mistakes || {}; S.drills = d.drills || {}; S.essays = d.essays || [];
   } catch (err) {
     $('#app').innerHTML = `<div class="card"><b>Не удалось загрузить данные.</b><p class="muted small">${esc(err.message)}</p>
       <p>Если сохранение настроено через GitHub — проверь токен в <a href="#/settings">настройках</a>.</p></div>`;
