@@ -13,6 +13,7 @@
 ## Структура
 - `server.py` — статика (с поддержкой Range для mp3) + API: `GET/POST /api/results`, `DELETE /api/results/<id>`, `GET/PUT /api/store/<name>`.
 - `static/app.js` — всё приложение (hash-роутер). Типы вопросов и советы — объект `TAGS` в начале файла.
+- `static/hsk-words.json` — слова HSK 2.0 уровней 1–5 (`{w, py, tr, l}`, русский перевод) из [LiudmilaLV/json_hsk](https://github.com/LiudmilaLV/json_hsk); пустые переводы дописаны вручную. Используется в «Словаре» (добавить 20 новых слов, весь список `#/hsk/<уровень>`) и для автозаполнения в диалоге «+ в словарь».
 - `tests/catalog.json` — список тестов в каталоге.
 - `tests/<id>/test.json` — сам тест, рядом `listening.mp3` и `img/`.
 - Попытка (`results/<id>.json`): ответы, «не уверен», время, метки аудио, сочинения, самооценка. `vocab.json` — словарь, `mistakes.json` — прогресс по работе над ошибками.

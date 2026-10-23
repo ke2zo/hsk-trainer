@@ -224,6 +224,7 @@ const routes = [
   [/^#\/stats$/, statsView],
   [/^#\/mistakes$/, mistakesView],
   [/^#\/vocab$/, vocabView],
+  [/^#\/hsk\/([1-5])$/, hskView],
   [/^#\/guide$/, guideView],
   [/^#\/settings$/, settingsView],
 ];
@@ -776,9 +777,15 @@ async function mistakeAnswer(ans) {
 
 // ---------------- словарь ----------------
 let flash = null;
-function vocabView() {
+// официальный список HSK 2.0 (уровни 1–5, ~2500 слов) с русским переводом: static/hsk-words.json
+let HSK = null;
+const hskWords = async () => HSK ||= await fetch('static/hsk-words.json').then(r => r.json());
+let hskLevel = lsGet('hsk.level') || 5;
+async function vocabView() {
   if (flash) return flashView();
   const due = S.vocab.filter(isDue).length;
+  const hsk = await hskWords(), mine = new Set(S.vocab.map(v => v.w));
+  const lvl = hsk.filter(x => x.l === hskLevel), have = lvl.filter(x => mine.has(x.w)).length;
   view(`
     <h1>Мой словарь</h1>
     <div class="card"><div class="row">
@@ -786,10 +793,39 @@ function vocabView() {
       <button class="btn" data-act="flashStart" ${S.vocab.length ? '' : 'disabled'}>Карточки (${due} на сегодня)</button>
       <div class="spacer"></div><button class="btn sm" data-act="exportCsv" ${S.vocab.length ? '' : 'disabled'}>Экспорт CSV (Anki / Pleco)</button></div>
       <p class="muted small">Добавляй незнакомые слова из разбора теста: выдели слово мышкой → «+ в словарь». Карточки работают по системе Лейтнера: знаешь — интервал растёт (1→3→7→14→30 дней), не знаешь — карточка возвращается завтра.</p></div>
+    <div class="card"><div class="row">
+      <b>Слова HSK</b><div class="seg">
+        ${[1, 2, 3, 4, 5].map(l => `<button data-act="hskLevel" data-l="${l}" class="${l === hskLevel ? 'on' : ''}">${l}</button>`).join('')}
+      </div><span class="muted">в словаре ${have} из ${lvl.length}</span>
+      <div class="spacer"></div>
+      <button class="btn primary" data-act="hskAdd" data-k="20" ${have < lvl.length ? '' : 'disabled'}>+ 20 новых слов</button>
+      <a class="btn" href="#/hsk/${hskLevel}">Весь список</a></div>
+      <div class="bar" style="margin-top:12px"><i style="width:${pct(have, lvl.length)}%;background:var(--ok)"></i></div>
+      <p class="muted small">Все слова уровня с пиньинем и переводом. HSK 5 — это 1300 новых слов поверх 1200 слов HSK 1–4. Добавляй по 20 в день и проходи карточки: так весь уровень пройдёшь за ~2 месяца.</p></div>
     ${S.vocab.length ? `<div class="card"><table><tr><th>Слово</th><th>Пиньинь</th><th>Перевод</th><th>Откуда</th><th>Уровень</th><th></th></tr>
       ${S.vocab.map((v, i) => `<tr><td class="zh">${esc(v.w)}</td><td>${esc(v.py)}</td><td>${esc(v.tr)}</td><td class="muted small">${esc(v.src)}</td><td>${v.box || 0}</td>
         <td><button class="btn sm ghost" data-act="delWord" data-i="${i}">✕</button></td></tr>`).reverse().join('')}</table></div>` : '<p class="muted">Словарь пуст.</p>'}
   `);
+}
+async function hskView(l) {
+  l = +l;
+  const mine = new Set(S.vocab.map(v => v.w)), list = (await hskWords()).filter(x => x.l === l);
+  view(`
+    <div class="row"><a href="#/vocab">← Словарь</a></div>
+    <h1>Слова HSK ${l} <span class="muted" style="font-size:16px">${list.length}</span></h1>
+    <div class="card"><div class="row">
+      <input type="search" data-hsksearch placeholder="Поиск: иероглиф, пиньинь или перевод" style="flex:1;min-width:200px">
+      <button class="btn" data-act="hskAddAll" data-l="${l}">Добавить все в словарь</button></div></div>
+    <div class="card"><table><tr><th>Слово</th><th>Пиньинь</th><th>Перевод</th><th></th></tr>
+      ${list.map(x => `<tr data-hskrow="${esc([x.w, x.py, x.py.normalize('NFD').replace(/[̀-ͯ]/g, ''), x.tr].join(' ').toLowerCase())}"><td class="zh">${esc(x.w)}</td><td>${esc(x.py)}</td><td>${esc(x.tr)}</td>
+        <td>${mine.has(x.w) ? '<span class="muted small">в словаре</span>' : `<button class="btn sm" data-act="hskAddOne" data-w="${esc(x.w)}">+</button>`}</td></tr>`).join('')}
+    </table></div>`);
+}
+async function addHskWords(words) {
+  const mine = new Set(S.vocab.map(v => v.w)), now = Date.now();
+  const nv = words.filter(x => !mine.has(x.w)).map(x => ({ w: x.w, py: x.py, tr: x.tr, src: `HSK ${x.l}`, added: now, box: 0 }));
+  if (nv.length) { S.vocab.push(...nv); await saveVocab(); }
+  return nv.length;
 }
 const BOX_DAYS = [0, 1, 3, 7, 14, 30];
 const isDue = v => !v.next || v.next <= Date.now();
@@ -811,6 +847,13 @@ function wordDialog(src) {
     <label>Перевод / смысл</label><input type="text" name="tr">
     <div class="row" style="margin-top:16px"><div class="spacer"></div><button class="btn" value="cancel">Отмена</button><button class="btn primary" value="ok">Сохранить</button></div></form>`;
   dlg.showModal();
+  // если слово есть в списке HSK — подставляем пиньинь и перевод
+  const f0 = dlg.querySelector('form');
+  const fill = async () => {
+    const x = (await hskWords()).find(x => x.w === f0.w.value.trim());
+    if (x && !f0.py.value && !f0.tr.value) { f0.py.value = x.py; f0.tr.value = x.tr; }
+  };
+  f0.w.addEventListener('change', fill); fill();
   dlg.onclose = () => {
     if (dlg.returnValue !== 'ok') return;
     const f = dlg.querySelector('form'); const w = f.w.value.trim(); if (!w) return;
@@ -1044,6 +1087,21 @@ document.addEventListener('click', async e => {
       saveVocab(); flash.i++; flash.show = false; flashView(); break;
     }
     case 'flashExit': flash = null; vocabView(); break;
+    case 'hskLevel': hskLevel = +el.dataset.l; lsSet('hsk.level', hskLevel); vocabView(); break;
+    case 'hskAdd': {
+      const mine = new Set(S.vocab.map(v => v.w));
+      const k = await addHskWords((await hskWords()).filter(x => x.l === hskLevel && !mine.has(x.w)).slice(0, +el.dataset.k));
+      toast(`Добавлено слов: ${k}`); vocabView(); break;
+    }
+    case 'hskAddOne': {
+      await addHskWords((await hskWords()).filter(x => x.w === el.dataset.w));
+      el.outerHTML = '<span class="muted small">в словаре</span>'; break;
+    }
+    case 'hskAddAll': {
+      const l = +el.dataset.l;
+      if (!confirm(`Добавить все слова HSK ${l} в карточки? Они все станут «на сегодня» — лучше добавлять по 20 в день.`)) break;
+      toast(`Добавлено слов: ${await addHskWords((await hskWords()).filter(x => x.l === l))}`); hskView(l); break;
+    }
     case 'ghSave': connectGitHub(); break;
     case 'ghOff': if (confirm('Отключить синхронизацию на этом устройстве? Данные в репозитории останутся.')) { lsSet('hsk.gh', null); location.hash = '#/settings'; location.reload(); } break;
     case 'browserOnly': lsSet('hsk.browserOnly', true); await Store.init(); { const d = await Store.loadAll(); S.results = d.results || []; S.vocab = d.vocab || []; S.mistakes = d.mistakes || {}; } location.hash = '#/'; break;
@@ -1059,6 +1117,11 @@ document.addEventListener('click', async e => {
   }
 });
 document.addEventListener('input', e => {
+  if (e.target.matches('[data-hsksearch]')) {
+    const q = e.target.value.trim().toLowerCase();
+    $$('[data-hskrow]').forEach(tr => { tr.hidden = !!q && !tr.dataset.hskrow.includes(q); });
+    return;
+  }
   const n = e.target.dataset.essay; if (!n) return;
   const text = e.target.value;
   updDraft(d => { (d.essays ||= {})[n] = text; d.times[n] = Date.now() - d.secStartedAt; });
