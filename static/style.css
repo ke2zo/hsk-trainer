@@ -154,3 +154,6 @@ dialog input { width: 100%; }
   .hbar .track { grid-column: 1 / -1; grid-row: 2; }
   .runbar { top: 92px; }
 }
+
+/* упражнения «Похожие слова» / «Грамматика»: русский и китайский вперемешку — основной шрифт, китайский через fallback */
+.mixed, .mixed .opt, .mixed .zh { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, var(--zh); }

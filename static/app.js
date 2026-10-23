@@ -82,8 +82,8 @@ const Store = {
   },
   async loadAll() {
     if (this.mode === 'local') {
-      const [results, vocab, mistakes] = await Promise.all([api('/api/results'), api('/api/store/vocab'), api('/api/store/mistakes')]);
-      return { results, vocab, mistakes };
+      const [results, vocab, mistakes, drills] = await Promise.all([api('/api/results'), api('/api/store/vocab'), api('/api/store/mistakes'), api('/api/store/drills')]);
+      return { results, vocab, mistakes, drills };
     }
     if (this.mode === 'github') {
       const r = await this.ghReq('results');
@@ -92,8 +92,8 @@ const Store = {
         const files = (await r.json()).filter(f => f.name.endsWith('.json'));
         results = await Promise.all(files.map(f => this.ghGet(f.path)));
       } else if (r.status !== 404) throw new Error(`GitHub ${r.status}`);
-      const [vocab, mistakes] = await Promise.all([this.ghGet('vocab.json'), this.ghGet('mistakes.json')]);
-      return { results, vocab, mistakes };
+      const [vocab, mistakes, drills] = await Promise.all([this.ghGet('vocab.json'), this.ghGet('mistakes.json'), this.ghGet('drills.json')]);
+      return { results, vocab, mistakes, drills };
     }
     return lsGet('hsk.data') || { results: [] };
   },
@@ -112,7 +112,7 @@ const Store = {
     if (this.mode === 'github') return this.ghPut(`${name}.json`, obj, `update ${name}`);
     return this.saveBrowser();
   },
-  saveBrowser() { lsSet('hsk.data', { results: S.results, vocab: S.vocab, mistakes: S.mistakes }); return Promise.resolve(); },
+  saveBrowser() { lsSet('hsk.data', { results: S.results, vocab: S.vocab, mistakes: S.mistakes, drills: S.drills }); return Promise.resolve(); },
 
   ghReq(path, opts = {}, repo = this.gh.repo, token = this.gh.token) {
     return fetch(`https://api.github.com/repos/${repo}${path == null ? '' : '/contents/' + path}`, {
@@ -156,7 +156,7 @@ const Store = {
 };
 
 // ---------------- состояние ----------------
-const S = { catalog: [], tests: {}, results: [], vocab: [], mistakes: {} };
+const S = { catalog: [], tests: {}, results: [], vocab: [], mistakes: {}, drills: {} };
 let timerHandle = null;
 let segAudio = null;
 
@@ -175,6 +175,7 @@ async function getTest(id) {
 }
 const saveVocab = () => Store.save('vocab', S.vocab);
 const saveMistakes = () => Store.save('mistakes', S.mistakes);
+const saveDrills = () => Store.save('drills', S.drills);
 const draft = { get: () => lsGet('hsk.draft'), set: d => lsSet('hsk.draft', d) };
 
 // ---------------- подсчёт баллов ----------------
@@ -225,6 +226,8 @@ const routes = [
   [/^#\/mistakes$/, mistakesView],
   [/^#\/vocab$/, vocabView],
   [/^#\/hsk\/([1-5])$/, hskView],
+  [/^#\/words$/, synView],
+  [/^#\/grammar$/, gramView],
   [/^#\/guide$/, guideView],
   [/^#\/settings$/, settingsView],
 ];
@@ -274,6 +277,8 @@ async function home() {
       <a class="tile" href="#/mistakes"><div class="ico">错</div><b>Работа над ошибками</b><span class="muted small">${mcount} вопрос(ов) к повторению</span></a>
       <a class="tile" href="#/stats"><div class="ico">析</div><b>Статистика</b><span class="muted small">слабые места и прогресс</span></a>
       <a class="tile" href="#/vocab"><div class="ico">词</div><b>Мой словарь</b><span class="muted small">${S.vocab.length} слов · карточки</span></a>
+      <a class="tile" href="#/words"><div class="ico">近</div><b>Похожие слова</b><span class="muted small">穿/戴, 了解/理解… · упражнения</span></a>
+      <a class="tile" href="#/grammar"><div class="ico">语</div><b>Грамматика</b><span class="muted small">把, 被, связки, порядок слов</span></a>
       <a class="tile" href="#/guide"><div class="ico">法</div><b>Как готовиться</b><span class="muted small">стратегии и план</span></a>
     </div>
     <h2>Последние попытки</h2>
@@ -873,6 +878,93 @@ function wordDialog(src) {
   };
 }
 
+// ---------------- похожие слова и грамматика ----------------
+// упражнения — static/drills.json; прогресс — S.drills[`${kind}:${группа}:${i}`] = { n, ok, last }
+let DR = null, X = null;   // X — текущая тренировка
+const drillsData = async () => DR ||= await fetch('static/drills.json').then(r => r.json());
+const shuffle = a => a.map(x => [Math.random(), x]).sort((p, q) => p[0] - q[0]).map(p => p[1]);
+const drillHash = kind => kind === 'syn' ? '#/words' : '#/grammar';
+function groupStat(kind, g) {
+  let n = 0, ok = 0, seen = 0;
+  g.items.forEach((_, i) => { const p = S.drills[`${kind}:${g.id}:${i}`]; if (p) { seen++; n += p.n; ok += p.ok; } });
+  return n ? `<span class="pill ${pct(ok, n) >= 80 ? 'ok' : pct(ok, n) >= 60 ? 'warn' : 'bad'}">${pct(ok, n)}% · ${seen}/${g.items.length}</span>`
+    : `<span class="muted small">не начато · ${g.items.length}</span>`;
+}
+async function synView() {
+  if (X?.kind === 'syn') return drillCard();
+  const { synonyms } = await drillsData();
+  view(`<h1>Похожие слова</h1>
+    <div class="card"><div class="row"><b>${synonyms.length} групп</b><div class="spacer"></div>
+      <button class="btn primary" data-act="xstart" data-kind="syn">Тренировать вперемешку (15)</button></div>
+      <p class="muted small">В чтении, часть 1 (46–60) почти каждый пропуск — выбор между похожими словами: 穿/戴, 相似/相同, 允许/赞成… Вперемешку сначала идут новые и те, где ты ошибся в прошлый раз.</p></div>
+    ${synonyms.map(g => `<div class="card"><div class="row"><b class="zh" style="font-size:20px">${g.words.map(esc).join(' / ')}</b><div class="spacer"></div>
+      ${groupStat('syn', g)}<button class="btn sm" data-act="xstart" data-kind="syn" data-g="${g.id}">Тренировать</button></div>
+      <p class="small" style="margin:8px 0 0">${esc(g.rule)}</p></div>`).join('')}`);
+}
+async function gramView() {
+  if (X?.kind === 'gram') return drillCard();
+  const { grammar } = await drillsData();
+  view(`<h1>Грамматика HSK 5</h1>
+    <div class="card"><div class="row"><b>${grammar.length} тем</b><div class="spacer"></div>
+      <button class="btn primary" data-act="xstart" data-kind="gram">Тренировать вперемешку (15)</button></div>
+      <p class="muted small">Порядок слов, 把/被, дополнения и связки нужны для письма (91–98) и сочинения, скрытый смысл фраз — для аудирования.</p></div>
+    ${grammar.map(g => `<div class="card"><div class="row"><b>${esc(g.title)}</b><div class="spacer"></div>
+      ${groupStat('gram', g)}<button class="btn sm" data-act="xstart" data-kind="gram" data-g="${g.id}">Тренировать</button></div>
+      <details style="margin-top:8px"><summary>Правило и примеры</summary><p class="small">${esc(g.rule)}</p>
+        <ul class="zh">${g.examples.map(x => `<li>${esc(x)}</li>`).join('')}</ul></details></div>`).join('')}`);
+}
+async function drillStart(kind, gid) {
+  const data = await drillsData();
+  let queue = (kind === 'syn' ? data.synonyms : data.grammar).filter(g => !gid || g.id === gid)
+    .flatMap(g => g.items.map((item, i) => ({ g, item, key: `${kind}:${g.id}:${i}` })));
+  queue = shuffle(queue);
+  // вперемешку: сначала новые и ошибочные
+  if (!gid) queue = queue.sort((a, b) => (S.drills[a.key]?.last ? 1 : 0) - (S.drills[b.key]?.last ? 1 : 0)).slice(0, 15);
+  for (const e of queue) {
+    if (e.item.type === 'order') { do e.words = shuffle(e.item.w); while (e.words.join('') === e.item.w.join('')); }
+    else e.opts = shuffle(e.item.o || e.g.words);
+  }
+  X = { kind, queue, i: 0, ok: 0, done: 0, ans: null, pick: [] };
+  drillCard();
+}
+// подставляет ответ в пропуски ＿＿ (для пар связок «即使…也» — по частям)
+const fillBlanks = (s, a) => { const parts = a ? a.split('…') : []; let k = 0; return esc(s).replace(/＿＿/g, () => a ? `<u style="color:var(--ok)">${esc(parts[k++] ?? '')}</u>` : '＿＿＿'); };
+function drillCard() {
+  const e = X.queue[X.i];
+  if (!e) {
+    view(`<div class="card flash"><div class="w">完成!</div><p>Решено ${X.done} · верно ${X.ok}</p><button class="btn primary" data-act="xexit">К списку</button></div>`);
+    X = null; return;
+  }
+  const it = e.item;
+  let body;
+  if (it.type === 'order') {
+    body = `<p class="muted">Составь предложение: ${esc(it.tr)}</p>
+      <div class="answerline ${X.ans ? (X.right ? 'ok' : 'bad') : ''}" style="margin-left:0">${X.pick.map((wi, k) => `<button class="chip" data-act="xunpick" data-k="${k}" ${X.ans ? 'disabled' : ''}>${esc(e.words[wi])}</button>`).join('') || '<span class="muted small">нажимай на слова ниже по порядку</span>'}</div>
+      ${X.ans ? '' : `<div class="chips" style="margin-left:0">${e.words.map((w, i) => `<button class="chip ${X.pick.includes(i) ? 'used' : ''}" data-act="xpick" data-i="${i}">${esc(w)}</button>`).join('')}</div>
+        <div class="qtools"><button class="btn sm" data-act="xcheck" ${X.pick.length ? '' : 'disabled'}>Проверить</button></div>`}`;
+  } else {
+    body = `<p class="zh" style="font-size:20px">${fillBlanks(it.s, X.ans && it.a)}</p>
+      <div class="opts" style="margin-left:0">${e.opts.map((o, k) => {
+        const cls = X.ans ? (o === it.a ? 'right' : o === X.ans ? 'wrong' : '') : '';
+        return `<button class="opt ${cls}" data-act="xchoose" data-k="${k}" ${X.ans ? 'disabled' : ''}><b>${L(k)}</b><span>${esc(o)}</span></button>`;
+      }).join('')}</div>`;
+  }
+  const right = it.type === 'order' ? it.a[0] : it.a;
+  view(`<div class="row"><a href="javascript:void(0)" data-act="xexit">← К списку</a><div class="spacer"></div>
+      <span class="muted">${X.i + 1} / ${X.queue.length}</span><span class="pill ${e.g.words ? 'zh' : ''}">${esc(e.g.title || e.g.words.join(' / '))}</span></div>
+    <div class="group mixed" style="margin-top:12px">${body}
+      ${X.ans ? `<div class="qtools"><span class="pill ${X.right ? 'ok' : 'bad'}">${X.right ? 'верно' : 'неверно, правильно: ' + esc(right)}</span>
+        <div class="spacer"></div><button class="btn primary" data-act="xnext">Дальше →</button></div>
+        ${it.why ? `<div class="tip">${esc(it.why)}</div>` : ''}${X.right ? '' : `<div class="tip small">${esc(e.g.rule)}</div>`}` : ''}
+    </div>`);
+}
+function drillAnswer(ans, right) {
+  const e = X.queue[X.i], p = S.drills[e.key] ||= { n: 0, ok: 0 };
+  X.ans = ans; X.right = right; X.done++; if (right) X.ok++;
+  p.n++; if (right) p.ok++; p.last = right;
+  saveDrills(); drillCard();
+}
+
 // ---------------- запросы для Claude ----------------
 function claudePrompt(t, n, ans) {
   const { q, group, section } = t.qs[n];
@@ -996,6 +1088,7 @@ async function importData(d) {
   const nv = (d.vocab || []).filter(v => !words.has(v.w));
   if (nv.length) { S.vocab.push(...nv); await saveVocab(); }
   if (d.mistakes && Object.keys(d.mistakes).length) { S.mistakes = { ...d.mistakes, ...S.mistakes }; await saveMistakes(); }
+  if (d.drills && Object.keys(d.drills).length) { S.drills = { ...d.drills, ...S.drills }; await saveDrills(); }
 }
 async function connectGitHub() {
   const repo = $('#ghRepo').value.trim().replace(/^https:\/\/github.com\//, '').replace(/\/$/, '');
@@ -1008,7 +1101,7 @@ async function connectGitHub() {
   lsSet('hsk.gh', { repo, token });
   Store.gh = { repo, token }; Store.mode = 'github'; Store.sha = {};
   const d = await Store.loadAll();
-  S.results = (d.results || []).filter(Boolean); S.vocab = d.vocab || []; S.mistakes = d.mistakes || {};
+  S.results = (d.results || []).filter(Boolean); S.vocab = d.vocab || []; S.mistakes = d.mistakes || {}; S.drills = d.drills || {};
   if (prev) { await importData(prev); lsSet('hsk.data', null); lsSet('hsk.browserOnly', null); }
   toast('GitHub подключён ✓');
   location.hash = '#/';
@@ -1097,6 +1190,13 @@ document.addEventListener('click', async e => {
       saveVocab(); flash.i++; flash.show = false; flashView(); break;
     }
     case 'flashExit': flash = null; vocabView(); break;
+    case 'xstart': drillStart(el.dataset.kind, el.dataset.g); break;
+    case 'xchoose': if (X && !X.ans) { const e = X.queue[X.i], o = e.opts[+el.dataset.k]; drillAnswer(o, o === e.item.a); } break;
+    case 'xpick': X.pick.push(+el.dataset.i); drillCard(); break;
+    case 'xunpick': X.pick.splice(+el.dataset.k, 1); drillCard(); break;
+    case 'xcheck': { const e = X.queue[X.i], ans = X.pick.map(i => e.words[i]).join(''); drillAnswer(ans, e.item.a.some(a => norm(a) === norm(ans))); break; }
+    case 'xnext': X.i++; X.ans = null; X.pick = []; drillCard(); break;
+    case 'xexit': { const k = X?.kind || (location.hash === '#/grammar' ? 'gram' : 'syn'); X = null; k === 'syn' ? synView() : gramView(); break; }
     case 'hskLevel': hskLevel = +el.dataset.l; lsSet('hsk.level', hskLevel); vocabView(); break;
     case 'hskAddOne': {
       await addHskWords((await hskWords()).filter(x => x.w === el.dataset.w));
@@ -1109,10 +1209,10 @@ document.addEventListener('click', async e => {
     }
     case 'ghSave': connectGitHub(); break;
     case 'ghOff': if (confirm('Отключить синхронизацию на этом устройстве? Данные в репозитории останутся.')) { lsSet('hsk.gh', null); location.hash = '#/settings'; location.reload(); } break;
-    case 'browserOnly': lsSet('hsk.browserOnly', true); await Store.init(); { const d = await Store.loadAll(); S.results = d.results || []; S.vocab = d.vocab || []; S.mistakes = d.mistakes || {}; } location.hash = '#/'; break;
+    case 'browserOnly': lsSet('hsk.browserOnly', true); await Store.init(); { const d = await Store.loadAll(); S.results = d.results || []; S.vocab = d.vocab || []; S.mistakes = d.mistakes || {}; S.drills = d.drills || {}; } location.hash = '#/'; break;
     case 'exportAll': {
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(new Blob([JSON.stringify({ results: S.results, vocab: S.vocab, mistakes: S.mistakes }, null, 1)], { type: 'application/json' }));
+      a.href = URL.createObjectURL(new Blob([JSON.stringify({ results: S.results, vocab: S.vocab, mistakes: S.mistakes, drills: S.drills }, null, 1)], { type: 'application/json' }));
       a.download = `hsk-backup-${dayKey(Date.now())}.json`; a.click(); break;
     }
     case 'exportCsv': {
@@ -1134,7 +1234,7 @@ document.addEventListener('input', e => {
   const req = $(`[data-req="${n}"]`);
   if (req) getTest(draft.get().testId).then(t => { req.innerHTML = reqHtml(t.qs[n].q, text); });
 });
-window.addEventListener('hashchange', () => { if (!location.hash.startsWith('#/mistakes')) M = null; if (location.hash !== '#/vocab') flash = null; render(); });
+window.addEventListener('hashchange', () => { if (!location.hash.startsWith('#/mistakes')) M = null; if (location.hash !== '#/vocab') flash = null; if (X && location.hash !== drillHash(X.kind)) X = null; render(); });
 
 (async function init() {
   try {
@@ -1142,7 +1242,7 @@ window.addEventListener('hashchange', () => { if (!location.hash.startsWith('#/m
     await Store.init();
     if (!Store.mode) { if (!location.hash.startsWith('#/guide')) location.hash = '#/settings'; render(); return; }
     const d = await Store.loadAll();
-    S.results = (d.results || []).filter(Boolean); S.vocab = d.vocab || []; S.mistakes = d.mistakes || {};
+    S.results = (d.results || []).filter(Boolean); S.vocab = d.vocab || []; S.mistakes = d.mistakes || {}; S.drills = d.drills || {};
   } catch (err) {
     $('#app').innerHTML = `<div class="card"><b>Не удалось загрузить данные.</b><p class="muted small">${esc(err.message)}</p>
       <p>Если сохранение настроено через GitHub — проверь токен в <a href="#/settings">настройках</a>.</p></div>`;
