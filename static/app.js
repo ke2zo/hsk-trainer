@@ -237,6 +237,7 @@ const routes = [
 async function render() {
   clearInterval(timerHandle); timerHandle = null;
   if (segAudio) segAudio.pause();
+  ttsStop();
   const h = location.hash || '#/';
   if (!Store.mode && !/^#\/(settings|guide)$/.test(h)) { location.hash = '#/settings'; return; }
   $$('.topbar nav a').forEach(a => a.classList.toggle('active', h.startsWith(a.getAttribute('href'))));
@@ -413,6 +414,7 @@ function questionHtml(t, q, d, mode) {
   const tools = [];
   if (mode !== 'review' && q.type !== 'essay') tools.push(`<button class="unsure ${d.unsure[q.n] ? 'on' : ''}" data-act="unsure" data-n="${q.n}">? не уверен</button>`);
   if (d.mode === 'practice' && mode !== 'review' && q.type === 'order' && !reveal) tools.push(`<button class="btn sm" data-act="checkorder" data-n="${q.n}">Проверить</button>`);
+  if (isListen && t.qs[q.n].section.tts && mode === 'run' && d.mode === 'practice') tools.push(`<button class="btn sm" data-act="ttsQ" data-n="${q.n}">▶ фрагмент аудио</button>`);
   if (isListen && reveal && q.transcript) tools.push(`<details><summary>Текст аудио</summary><div class="transcript" style="margin-left:0">${esc(q.transcript)}</div></details>`);
   const prompt = q.prompt || (reveal && q.q ? q.q : '');
   return `<div class="q" id="q${q.n}"><div class="qhead"><span class="qnum">${q.n}.</span><span class="zh">${esc(prompt)}</span></div>
@@ -435,7 +437,7 @@ async function runView() {
         <div class="spacer"></div><span class="timer" id="timer">--:--</span>
         <button class="btn primary sm" data-act="finishSec">${last ? 'Завершить тест' : 'Следующий раздел →'}</button>
       </div>
-      ${sec.audio ? playerHtml(t, sec, d) : ''}
+      ${sec.audio ? playerHtml(t, sec, d) : sec.tts ? ttsPlayerHtml(d) : ''}
       <div class="navgrid" id="navgrid">${qs.map(q => `<a href="javascript:void(0)" data-act="jump" data-n="${q.n}" id="nav${q.n}">${q.n}</a>`).join('')}</div>
     </div>`;
   for (const part of sec.parts) {
@@ -452,6 +454,12 @@ async function runView() {
   view(html);
   refreshNav(t, d, qs);
   if (sec.audio) setupPlayer(d);
+  if (sec.tts) {
+    const pos = lsGet('hsk.ttspos');
+    TTS = { id: d.id, items: ttsScript(t, d.mode === 'exam' ? 10000 : 4000), i: pos?.id === d.id ? pos.i : 0, playing: false, rate: 0.9 };
+    const rate = $('#ttsrate'); if (rate) rate.onchange = () => { TTS.rate = +rate.value; };
+    if (TTS.i) { $('#playbtn').textContent = '▶ Продолжить'; ttsStatus(); }
+  }
   const limit = (sec.timeLimitMin || 0) * 60;
   const tick = () => {
     const el = $('#timer'); if (!el) return;
@@ -520,6 +528,7 @@ async function finishSection() {
   const left = qs.filter(q => !(q.type === 'essay' ? d.essays?.[q.n] : d.answers[q.n])).length;
   const exp = (d.mode === 'exam' && (Date.now() - d.secStartedAt) / 1000 >= (sec.timeLimitMin || 0) * 60);
   if (!exp && left && !confirm(`Без ответа: ${left}. Завершить раздел?`)) return;
+  ttsStop(); lsSet('hsk.ttspos', null);
   d.secDur[sec.id] = Date.now() - d.secStartedAt;
   if (d.secIdx < d.sections.length - 1) {
     d.secIdx++; d.secStartedAt = Date.now(); draft.set(d); lsSet('hsk.audiopos', null); runView(); return;
@@ -614,7 +623,9 @@ function orderIdx(q, text) {
 }
 // фрагмент аудио: от предыдущего ответа до текущего (по меткам времени, записанным во время теста)
 function segmentFor(t, r, n) {
-  if (t.qs[n].section.id !== 'listening' || r.audioTimes?.[n] == null) return null;
+  if (t.qs[n].section.id !== 'listening') return null;
+  if (t.qs[n].section.tts) return { tts: ttsQuestionLines(t, n) };
+  if (r?.audioTimes?.[n] == null) return null;
   const end = r.audioTimes[n];
   const prev = Object.entries(r.audioTimes).map(([k, v]) => [+k, v]).filter(([k, v]) => k < n && v < end).map(([, v]) => v);
   let start = prev.length ? Math.max(...prev) : Math.max(0, end - 60);
@@ -622,6 +633,12 @@ function segmentFor(t, r, n) {
   return { src: t.base + t.qs[n].section.audio, start: Math.max(0, start - 2), end: end + 1 };
 }
 function playSegment(seg, btn) {
+  if (seg.tts) {
+    if (btn.dataset.speaking) { ttsStop(); return; }
+    btn.dataset.speaking = 1; btn.textContent = '■ стоп';
+    ttsSpeak(seg.tts, 0.9, () => { delete btn.dataset.speaking; btn.textContent = '▶ фрагмент аудио'; });
+    return;
+  }
   if (!segAudio) segAudio = new Audio();
   if (!segAudio.paused && segAudio._btn === btn) { segAudio.pause(); return; }
   if (!segAudio.src.endsWith(seg.src)) segAudio.src = seg.src;
@@ -879,14 +896,86 @@ function flashView() {
         <button class="btn primary" data-act="flashShow">Показать</button>`}</div>`);
 }
 // озвучка встроенным голосом браузера (zh-CN), без файлов
-function say(text, rate = 0.85) {
+function say(text, rate = 0.85) { ttsSpeak([{ text, v: 'f' }], rate); }
+// голоса zh-CN: женский и, если найдётся, мужской (иначе тот же голос ниже тоном)
+function zhVoices() {
+  const vs = speechSynthesis.getVoices().filter(v => /^zh[-_](CN|Hans)/i.test(v.lang));
+  const male = vs.find(v => /li-?mu|yu-?shu|kang|yunxi|yunyang|yunjian|male|男/i.test(v.name));
+  const female = vs.find(v => v !== male && /ting|xiao|mei|shan|lili|female|女/i.test(v.name)) || vs.find(v => v !== male) || vs[0];
+  return { female, male: male || female, same: !male };
+}
+// говорит строки [{text, v:'f'|'m'}] по очереди, потом done(); короткие фразы — Chrome обрывает длинные
+function ttsSpeak(lines, rate, done) {
   if (!window.speechSynthesis) { toast('Браузер не умеет озвучивать'); return; }
-  speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = 'zh-CN'; u.rate = rate;
-  const voice = speechSynthesis.getVoices().find(x => /^zh[-_]CN/i.test(x.lang));
-  if (voice) u.voice = voice;
-  speechSynthesis.speak(u);
+  const { female, male, same } = zhVoices();
+  let k = 0;
+  const next = () => {
+    if (k >= lines.length) { done?.(); return; }
+    const l = lines[k++], u = new SpeechSynthesisUtterance(l.text);
+    u.lang = 'zh-CN'; u.rate = rate;
+    const voice = l.v === 'm' ? male : female; if (voice) u.voice = voice;
+    if (l.v === 'm' && same) u.pitch = 0.6;
+    u.onend = next;
+    u.onerror = e => { if (e.error !== 'interrupted' && e.error !== 'canceled') next(); };
+    speechSynthesis.speak(u);
+  };
+  speechSynthesis.cancel(); next();
+}
+
+// ---------------- аудирование голосом браузера (тесты без mp3: section.tts) ----------------
+// порядок как на экзамене: номер → реплики 男/女 разными голосами → «问：…»; длинные тексты — текст, потом вопросы
+let TTS = null;   // { id, items:[{n, lines, gap}], i, playing, timer, rate }
+function ttsLines(text, who = 'f') {
+  const out = [];
+  for (const line of String(text || '').split('\n')) {
+    const m = line.match(/^([男女])[：:](.*)$/);
+    for (const s of (m ? m[2] : line).split(/(?<=[。！？；])/)) if (s.trim()) out.push({ text: s.trim(), v: m ? (m[1] === '男' ? 'm' : 'f') : who });
+  }
+  return out;
+}
+function ttsQuestionLines(t, n) {
+  const { q, group } = t.qs[n];
+  if (q.transcript) return [...ttsLines(q.transcript), { text: '问：' + q.q, v: 'f' }];
+  return [...ttsLines(group.transcript, 'm'), { text: `${n}、${q.q}`, v: 'f' }];
+}
+function ttsScript(t, gap) {
+  const sec = t.sections.find(s => s.id === 'listening'), out = [];
+  for (const p of sec.parts) for (const g of p.groups) {
+    if (g.transcript) {
+      out.push({ n: g.questions[0].n, gap: 1200, lines: [{ text: `第${g.questions[0].n}到${g.questions.at(-1).n}题是根据下面一段话：`, v: 'f' }, ...ttsLines(g.transcript, 'm')] });
+      for (const q of g.questions) out.push({ n: q.n, gap, lines: [{ text: `${q.n}、${q.q}`, v: 'f' }] });
+    } else for (const q of g.questions) out.push({ n: q.n, gap, lines: [{ text: `${q.n}、`, v: 'f' }, ...ttsLines(q.transcript), { text: '问：' + q.q, v: 'f' }] });
+  }
+  return out;
+}
+function ttsPlayerHtml(d) {
+  return `<div class="player"><button class="btn sm" id="playbtn" data-act="ttsPlay">▶ Запустить аудио</button>
+    ${d.mode === 'practice' ? `<button class="btn sm" data-act="ttsBack">⟲ Предыдущий</button>
+      <select id="ttsrate"><option value="0.8">0.8×</option><option value="0.9" selected>0.9×</option><option value="1">1×</option></select>` : ''}
+    <span class="small muted" id="atime">записи нет — читает голос браузера</span></div>`;
+}
+function ttsStatus() {
+  const el = $('#atime'); if (!el || !TTS) return;
+  const it = TTS.items[Math.min(TTS.i, TTS.items.length - 1)];
+  el.textContent = `голос браузера · вопрос ${it.n} из 45`;
+}
+function ttsStop() {
+  if (TTS) { clearTimeout(TTS.timer); TTS.playing = false; }
+  if (window.speechSynthesis) speechSynthesis.cancel();
+}
+function ttsRun() {
+  const it = TTS.items[TTS.i];
+  if (!it) {
+    TTS.playing = false; lsSet('hsk.ttspos', null);
+    if ($('#playbtn')) $('#playbtn').textContent = '✓ Аудио закончилось';
+    toast('Аудио закончилось — проверь ответы и переходи дальше'); return;
+  }
+  TTS.playing = true; ttsStatus();
+  ttsSpeak(it.lines, TTS.rate, () => {
+    if (!TTS?.playing) return;
+    TTS.i++; lsSet('hsk.ttspos', { id: TTS.id, i: TTS.i });
+    TTS.timer = setTimeout(() => TTS?.playing && ttsRun(), it.gap);
+  });
 }
 function wordDialog(src) {
   const sel = String(window.getSelection() || '').trim().slice(0, 30);
@@ -1273,6 +1362,12 @@ document.addEventListener('click', async e => {
     case 'back5': { const a = $('#audio'); a.currentTime = Math.max(0, a.currentTime - 5); break; }
     case 'finishSec': finishSection(); break;
     case 'rfilter': reviewFilter = el.dataset.f; { const y = scrollY; await resultView(el.dataset.rid); scrollTo(0, y); } break;
+    case 'ttsPlay':
+      if (TTS.playing) { ttsStop(); el.textContent = '▶ Продолжить'; }
+      else { el.textContent = '❚❚ Пауза'; ttsRun(); }
+      break;
+    case 'ttsBack': ttsStop(); TTS.i = Math.max(0, TTS.i - 1); $('#playbtn').textContent = '❚❚ Пауза'; ttsRun(); break;
+    case 'ttsQ': { const t = await getTest(draft.get().testId); playSegment({ tts: ttsQuestionLines(t, +n) }, el); break; }
     case 'seg': { const r = S.results.find(x => x.id === el.dataset.rid); const t = await getTest(r.testId); playSegment(segmentFor(t, r, +n), el); break; }
     case 'ask': { const t = await getTest(el.dataset.test); copy(claudePrompt(t, +n, el.dataset.ans)); break; }
     case 'addWord': wordDialog(el.dataset.src); break;
