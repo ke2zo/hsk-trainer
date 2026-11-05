@@ -157,3 +157,10 @@ dialog input { width: 100%; }
 
 /* упражнения «Похожие слова» / «Грамматика»: русский и китайский вперемешку — основной шрифт, китайский через fallback */
 .mixed, .mixed .opt, .mixed .zh { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, var(--zh); }
+
+/* сочинение: подсветка слов под прозрачным textarea */
+.hl-wrap { position: relative; background: var(--card); border-radius: 10px; }
+.hl-wrap textarea, .hl-back { font: 18px/1.8 var(--zh); padding: 10px; border: 1.5px solid transparent; white-space: pre-wrap; overflow-wrap: break-word; letter-spacing: normal; margin: 0; }
+.hl-wrap textarea { position: relative; z-index: 1; display: block; background: transparent; border-color: var(--line); min-height: 220px; }
+.hl-back { position: absolute; inset: 0; color: transparent; overflow: hidden; pointer-events: none; border-radius: 10px; }
+.hl-back mark { background: var(--ok-soft); color: transparent; border-radius: 4px; box-shadow: 0 0 0 1.5px var(--ok); }

@@ -1096,6 +1096,19 @@ function drillAnswer(ans, right) {
 // ---------------- сочинение (задание 99) ----------------
 // черновик — localStorage hsk.essayDraft = { words:[{w,py,tr}], text, started }; сохранённые — S.essays
 const newEssayDraft = async () => ({ words: shuffle((await hskWords()).filter(x => x.l === 5 && x.w.length === 2)).slice(0, 5), text: '', started: Date.now() });
+// подсветка обязательных слов прямо в тексте: подложка под прозрачным textarea
+function hlHtml(text, words) {
+  const re = new RegExp(words.slice().sort((a, b) => b.length - a.length).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
+  let out = '', last = 0;
+  for (const m of text.matchAll(re)) { out += esc(text.slice(last, m.index)) + `<mark>${esc(m[0])}</mark>`; last = m.index + m[0].length; }
+  return out + esc(text.slice(last)) + '\n ';
+}
+function essayStatus(d) {
+  const words = d.words.map(x => x.w), n = zhCount(d.text), miss = words.filter(w => !d.text.includes(w));
+  return `иероглифов: <b style="color:${n >= 80 && n <= 120 ? 'var(--ok)' : n > 120 ? 'var(--warn)' : 'inherit'}">${n}</b> (цель 90–110)` +
+    (miss.length ? ` · <span style="color:var(--bad)">ещё не использованы: <b class="zh">${esc(miss.join('、'))}</b></span>` : ' · <span style="color:var(--ok)">все 5 слов ✓</span>');
+}
+const essayMissing = d => d.words.map(x => x.w).filter(w => !d.text.includes(w));
 async function essayView() {
   let d = lsGet('hsk.essayDraft');
   if (!d) { d = await newEssayDraft(); lsSet('hsk.essayDraft', d); }
@@ -1108,8 +1121,13 @@ async function essayView() {
         <button class="btn sm" data-act="essayNew">Другие слова</button></div>
       <details class="small" style="margin-top:6px"><summary>Перевод слов</summary>${d.words.map(x => `<div><b class="zh">${esc(x.w)}</b> ${esc(x.py)} — ${esc(x.tr)}</div>`).join('')}</details>
       <div data-req="essay" style="margin:8px 0">${reqHtml(q, d.text)}</div>
-      <textarea data-essaytrain placeholder="写在这里…">${esc(d.text)}</textarea>
-      <div class="muted small" id="essayCount">иероглифов: ${zhCount(d.text)} / ~80</div>
+      <details class="small" style="margin-bottom:8px"><summary>Шаблон</summary><div class="transcript" style="margin-left:0;font-size:15px">① 开头：时间 + 地点 + 人物（1 句）
+② 经过：发生了什么 → 问题（2–3 句，сюда большинство слов）
+③ 结果：怎么解决的 + 感受/道理（1–2 句）
+Связки: 因为…所以 · 虽然…但是 · 于是 · 没想到 · 终于 · 从那以后</div></details>
+      <div class="hl-wrap"><div class="hl-back" id="essayBack">${hlHtml(d.text, q.required)}</div>
+        <textarea data-essaytrain placeholder="Сначала план: распредели 5 слов по шаблону. Потом пиши здесь — использованные слова подсветятся зелёным…">${esc(d.text)}</textarea></div>
+      <div class="small" id="essayCount" style="margin-top:6px">${essayStatus(d)}</div>
       <div class="row" style="margin-top:10px"><button class="btn" data-act="essayCopy">Проверить с Claude (копировать)</button><div class="spacer"></div>
         <span class="muted small">Оценка и в историю:</span>${RUBRIC.map((txt, i) => `<button class="btn sm" title="${esc(txt)}" data-act="essaySave" data-v="${i}">${i}</button>`).join('')}</div>
       <p class="muted small">Скопируй текст в чат с Claude — получишь оценку 0–5, исправления и образец. Потом поставь балл: сочинение уйдёт в историю, а слова сменятся.</p></div>
@@ -1117,6 +1135,7 @@ async function essayView() {
       ${e.words.map(w => `<span class="pill zh">${esc(w)}</span>`).join('')}<div class="spacer"></div>
       <span class="muted small">${zhCount(e.text)} иер. · ${fmtTime(e.secs)}</span><b>${e.score} / 5</b></div>
       <div class="transcript" style="margin-left:0">${esc(e.text)}</div></div>`).join('')}` : ''}`);
+  const ta = $('[data-essaytrain]'); ta.addEventListener('scroll', () => { $('#essayBack').scrollTop = ta.scrollTop; });
   timerHandle = setInterval(() => { const el = $('#essayTimer'); if (el) el.textContent = '⏱ ' + fmtTime((Date.now() - d.started) / 1000); }, 1000);
 }
 const essayTrainPrompt = d => `Я готовлюсь к HSK 5. Задание 99: написать текст примерно на 80 иероглифов, используя слова: ${d.words.map(x => x.w).join('、')}.\n\nМой текст:\n${d.text}\n\nОцени по шкале 0–5, как на экзамене (все ли слова использованы и правильно ли, связность, грамматика, объём). Исправь ошибки и покажи исправленный вариант, объясни ошибки по-русски и дай образцовый вариант примерно на 90 иероглифов.`;
@@ -1410,7 +1429,9 @@ document.addEventListener('click', async e => {
     case 'flashExit': flash = null; vocabView(); break;
     case 'xstart': await drillStart(el.dataset.kind, el.dataset.g, !!el.dataset.wrong); if (X) location.hash = drillHash(X.kind); break;
     case 'essayNew': if (!lsGet('hsk.essayDraft')?.text || confirm('Начать заново? Текст будет удалён.')) { lsSet('hsk.essayDraft', await newEssayDraft()); essayView(); } break;
-    case 'essayCopy': { const d = lsGet('hsk.essayDraft'); if (!zhCount(d?.text)) { toast('Сначала напиши текст'); break; } copy(essayTrainPrompt(d)); break; }
+    case 'essayCopy': { const d = lsGet('hsk.essayDraft'); if (!zhCount(d?.text)) { toast('Сначала напиши текст'); break; }
+      { const miss = essayMissing(d); if (miss.length && !confirm(`Не использованы: ${miss.join('、')}.\nНа экзамене за это сильно снижают балл. Всё равно отправить на проверку?`)) break; }
+      copy(essayTrainPrompt(d)); break; }
     case 'essaySave': {
       const d = lsGet('hsk.essayDraft'); if (!zhCount(d?.text)) { toast('Сначала напиши текст'); break; }
       S.essays.push({ id: 'e' + Date.now(), at: Date.now(), words: d.words.map(x => x.w), text: d.text, score: +el.dataset.v, secs: Math.round((Date.now() - d.started) / 1000) });
@@ -1458,7 +1479,8 @@ document.addEventListener('input', e => {
   if (e.target.matches('[data-essaytrain]')) {
     const d = lsGet('hsk.essayDraft'); if (!d) return;
     d.text = e.target.value; lsSet('hsk.essayDraft', d);
-    $('#essayCount').textContent = `иероглифов: ${zhCount(d.text)} / ~80`;
+    $('#essayCount').innerHTML = essayStatus(d);
+    $('#essayBack').innerHTML = hlHtml(d.text, d.words.map(x => x.w));
     $('[data-req=essay]').innerHTML = reqHtml({ required: d.words.map(x => x.w) }, d.text);
     return;
   }
